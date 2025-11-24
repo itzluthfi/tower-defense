@@ -326,11 +326,12 @@ app.get('/config.js', (req, res) => {
 });
 
 const PORT = process.env.PORT || 8080;
+const WS_HOST = process.env.WS_HOST || 'localhost';
 
 server.listen(PORT, () => {
     console.log(`🎮 Tower Defense Server running on port ${PORT}`);
-    console.log(`📡 WebSocket Server: ws://localhost:${PORT}`);
-    console.log(`🌐 Web Client: http://localhost:${PORT}`);
+    console.log(`📡 WebSocket Server: ws://${WS_HOST}:${PORT}`);
+    console.log(`🌐 Web Client: http://${WS_HOST}:${PORT}`);
 });
 
 // Graceful shutdown
