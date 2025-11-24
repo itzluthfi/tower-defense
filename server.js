@@ -1,3 +1,4 @@
+require('dotenv').config();
 const WebSocket = require('ws');
 const http = require('http');
 const express = require('express');
@@ -312,6 +313,16 @@ app.get('/health', (req, res) => {
         wave: gameState.wave,
         lives: gameState.lives
     });
+});
+
+app.get('/config.js', (req, res) => {
+    res.type('application/javascript');
+    res.send(`
+        // Konfigurasi Klien yang diambil dari .env server
+        const CONFIG = {
+            WS_URL: 'ws://${process.env.WS_HOST || 'localhost'}:${process.env.PORT || 8080}'
+        };
+    `);
 });
 
 const PORT = process.env.PORT || 8080;

@@ -36,7 +36,7 @@ const PATH = [
 // WebSocket Connection
 function connectWebSocket() {
     // Change this to your server URL
-    const wsUrl = 'ws://localhost:8080';
+    const wsUrl = CONFIG.WS_URL;
     
     try {
         ws = new WebSocket(wsUrl);
