@@ -11,18 +11,20 @@ const wss = new WebSocket.Server({ server });
 // Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Game state yang di-share ke semua clients
+// Game state
 let gameState = {
-    players: {},
+    attacker: null,
+    defender: null,
+    attackerGold: 1000,
+    defenderGold: 1000,
+    baseHP: 100,
     towers: [],
-    enemies: [],
-    wave: 1,
-    lives: 20,
-    gold: 500,
-    waveInProgress: false
+    troops: [],
+    gameStatus: 'waiting', // waiting, playing, finished
+    gameStartTime: 0
 };
 
-// Store all connected clients
+// Store clients
 const clients = new Map();
 
 // Broadcast to all clients
@@ -45,7 +47,7 @@ function sendToClient(client, data) {
 wss.on('connection', (ws) => {
     console.log('New client connected');
     
-    // Send current game state to new client
+    // Send current game state
     sendToClient(ws, {
         type: 'gameState',
         data: gameState
@@ -60,32 +62,24 @@ wss.on('connection', (ws) => {
                     handlePlayerJoined(ws, data);
                     break;
                     
+                case 'troopDeployed':
+                    handleTroopDeployed(data);
+                    break;
+                    
                 case 'towerPlaced':
                     handleTowerPlaced(data);
                     break;
                     
-                case 'startWave':
-                    handleStartWave(data);
+                case 'baseHit':
+                    handleBaseHit(data);
                     break;
                     
-                case 'enemyDied':
-                    handleEnemyDied(data);
-                    break;
-                    
-                case 'enemyReachedBase':
-                    handleEnemyReachedBase(data);
-                    break;
-                    
-                case 'waveComplete':
-                    handleWaveComplete(data);
+                case 'gameOver':
+                    handleGameOver(data);
                     break;
                     
                 case 'chat':
                     handleChat(data);
-                    break;
-                    
-                case 'syncGameState':
-                    handleSyncGameState(data);
                     break;
                     
                 default:
@@ -107,128 +101,139 @@ wss.on('connection', (ws) => {
 });
 
 function handlePlayerJoined(ws, data) {
-    const { playerId, playerName } = data;
+    const { playerId, playerName, role } = data;
     
-    // Add player to game state
-    gameState.players[playerId] = {
-        name: playerName,
-        score: 0,
-        towersPlaced: 0
-    };
+    // Check if role is available
+    if (role === 'attacker' && gameState.attacker) {
+        sendToClient(ws, {
+            type: 'error',
+            message: 'Attacker role already taken'
+        });
+        return;
+    }
+    
+    if (role === 'defender' && gameState.defender) {
+        sendToClient(ws, {
+            type: 'error',
+            message: 'Defender role already taken'
+        });
+        return;
+    }
+    
+    // Assign role
+    if (role === 'attacker') {
+        gameState.attacker = { id: playerId, name: playerName };
+    } else {
+        gameState.defender = { id: playerId, name: playerName };
+    }
     
     // Store client info
-    clients.set(ws, { playerId, playerName });
+    clients.set(ws, { playerId, playerName, role });
     
     // Notify all clients
     broadcast({
         type: 'playerJoined',
         playerId: playerId,
-        playerName: playerName
+        playerName: playerName,
+        role: role
     });
+    
+    console.log(`Player ${playerName} joined as ${role}`);
+    
+    // Check if both players ready - start game
+    if (gameState.attacker && gameState.defender && gameState.gameStatus === 'waiting') {
+        gameState.gameStatus = 'playing';
+        gameState.gameStartTime = Date.now();
+        
+        broadcast({
+            type: 'gameStarted'
+        });
+        
+        console.log('Game started!');
+    }
     
     // Send updated game state
     broadcast({
         type: 'gameState',
         data: gameState
     });
+}
+
+function handleTroopDeployed(data) {
+    const { playerId, troop, gold } = data;
     
-    console.log(`Player ${playerName} (${playerId}) joined the game`);
+    // Add troop to game state
+    gameState.troops.push(troop);
+    gameState.attackerGold = gold;
+    
+    // Broadcast to all clients
+    broadcast({
+        type: 'troopDeployed',
+        playerId: playerId,
+        troop: troop,
+        gold: gold
+    });
+    
+    console.log(`Troop deployed: ${troop.type} in lane ${troop.lane}`);
 }
 
 function handleTowerPlaced(data) {
-    const { playerId, playerName, tower, towerType } = data;
+    const { playerId, tower, gold } = data;
     
     // Add tower to game state
     gameState.towers.push(tower);
-    
-    // Update player stats
-    if (gameState.players[playerId]) {
-        gameState.players[playerId].towersPlaced++;
-        gameState.players[playerId].score += 10;
-    }
+    gameState.defenderGold = gold;
     
     // Broadcast to all clients
     broadcast({
         type: 'towerPlaced',
         playerId: playerId,
-        playerName: playerName,
         tower: tower,
-        towerType: towerType
+        gold: gold
     });
     
-    console.log(`${playerName} placed a ${towerType} tower at (${tower.x}, ${tower.y})`);
+    console.log(`Tower placed: ${tower.type} at (${tower.x}, ${tower.y})`);
 }
 
-function handleStartWave(data) {
-    if (gameState.waveInProgress) {
-        return;
-    }
+function handleBaseHit(data) {
+    const { baseHP, damage } = data;
     
-    gameState.waveInProgress = true;
+    gameState.baseHP = baseHP;
     
     broadcast({
-        type: 'waveStarted',
-        wave: gameState.wave
+        type: 'baseHit',
+        baseHP: baseHP,
+        damage: damage
     });
     
-    console.log(`Wave ${gameState.wave} started`);
-}
-
-function handleEnemyDied(data) {
-    const { enemyId, killerId, reward } = data;
-    
-    // Add gold
-    gameState.gold += reward;
-    
-    // Update player score
-    if (gameState.players[killerId]) {
-        gameState.players[killerId].score += reward;
-    }
-    
-    broadcast({
-        type: 'enemyDied',
-        enemyId: enemyId,
-        killerId: killerId,
-        reward: reward,
-        currentGold: gameState.gold
-    });
-}
-
-function handleEnemyReachedBase(data) {
-    gameState.lives--;
-    
-    broadcast({
-        type: 'enemyReachedBase',
-        lives: gameState.lives
-    });
+    console.log(`Base hit! Damage: ${damage}, HP: ${baseHP}`);
     
     // Check game over
-    if (gameState.lives <= 0) {
+    if (baseHP <= 0) {
+        gameState.gameStatus = 'finished';
+        
         broadcast({
             type: 'gameOver',
-            finalWave: gameState.wave,
-            players: gameState.players
+            winner: 'Attacker',
+            reason: 'Base destroyed'
         });
-        console.log('Game Over!');
+        
+        console.log('Game Over - Attacker wins!');
     }
 }
 
-function handleWaveComplete(data) {
-    const { wave, goldEarned } = data;
+function handleGameOver(data) {
+    const { winner, reason } = data;
     
-    gameState.gold += goldEarned;
-    gameState.wave++;
-    gameState.waveInProgress = false;
+    gameState.gameStatus = 'finished';
     
     broadcast({
-        type: 'waveComplete',
-        wave: wave,
-        goldEarned: goldEarned,
-        nextWave: gameState.wave,
-        currentGold: gameState.gold
+        type: 'gameOver',
+        winner: winner,
+        reason: reason
     });
     
-    console.log(`Wave ${wave} completed! Next wave: ${gameState.wave}`);
+    console.log(`Game Over - ${winner} wins! Reason: ${reason}`);
 }
 
 function handleChat(data) {
@@ -245,57 +250,55 @@ function handleChat(data) {
     console.log(`[Chat] ${playerName}: ${message}`);
 }
 
-function handleSyncGameState(data) {
-    // Update server game state from client
-    // This handles real-time synchronization
-    if (data.towers) gameState.towers = data.towers;
-    if (data.enemies) gameState.enemies = data.enemies;
-    if (data.gold !== undefined) gameState.gold = data.gold;
-    if (data.lives !== undefined) gameState.lives = data.lives;
-    
-    broadcast({
-        type: 'gameState',
-        data: gameState
-    }, data.sender);
-}
-
 function handlePlayerDisconnect(ws) {
     const clientInfo = clients.get(ws);
     
     if (clientInfo) {
-        const { playerId, playerName } = clientInfo;
+        const { playerId, playerName, role } = clientInfo;
         
-        // Remove player from game state
-        delete gameState.players[playerId];
+        // Clear role
+        if (role === 'attacker') {
+            gameState.attacker = null;
+        } else {
+            gameState.defender = null;
+        }
+        
+        // If game was playing, end it
+        if (gameState.gameStatus === 'playing') {
+            gameState.gameStatus = 'finished';
+            
+            broadcast({
+                type: 'gameOver',
+                winner: role === 'attacker' ? 'Defender' : 'Attacker',
+                reason: 'Opponent disconnected'
+            });
+        }
         
         // Notify other clients
         broadcast({
             type: 'playerLeft',
             playerId: playerId,
-            playerName: playerName
-        });
-        
-        // Send updated game state
-        broadcast({
-            type: 'gameState',
-            data: gameState
+            playerName: playerName,
+            role: role
         });
         
         clients.delete(ws);
-        console.log(`Player ${playerName} (${playerId}) left the game`);
+        console.log(`Player ${playerName} (${role}) left the game`);
     }
 }
 
 // Reset game endpoint
 app.post('/reset', (req, res) => {
     gameState = {
-        players: {},
+        attacker: null,
+        defender: null,
+        attackerGold: 1000,
+        defenderGold: 1000,
+        baseHP: 100,
         towers: [],
-        enemies: [],
-        wave: 1,
-        lives: 20,
-        gold: 500,
-        waveInProgress: false
+        troops: [],
+        gameStatus: 'waiting',
+        gameStartTime: 0
     };
     
     broadcast({
@@ -309,16 +312,17 @@ app.post('/reset', (req, res) => {
 app.get('/health', (req, res) => {
     res.json({
         status: 'OK',
-        connectedPlayers: Object.keys(gameState.players).length,
-        wave: gameState.wave,
-        lives: gameState.lives
+        attacker: gameState.attacker ? gameState.attacker.name : 'Waiting',
+        defender: gameState.defender ? gameState.defender.name : 'Waiting',
+        gameStatus: gameState.gameStatus,
+        baseHP: gameState.baseHP
     });
 });
 
+// Config endpoint
 app.get('/config.js', (req, res) => {
     res.type('application/javascript');
     res.send(`
-        // Konfigurasi Klien yang diambil dari .env server
         const CONFIG = {
             WS_URL: 'ws://${process.env.WS_HOST || 'localhost'}:${process.env.PORT || 8080}'
         };
@@ -329,7 +333,7 @@ const PORT = process.env.PORT || 8080;
 const WS_HOST = process.env.WS_HOST || 'localhost';
 
 server.listen(PORT, () => {
-    console.log(`🎮 Tower Defense Server running on port ${PORT}`);
+    console.log(`🎮 PvP Tower Defense Server running on port ${PORT}`);
     console.log(`📡 WebSocket Server: ws://${WS_HOST}:${PORT}`);
     console.log(`🌐 Web Client: http://${WS_HOST}:${PORT}`);
 });
