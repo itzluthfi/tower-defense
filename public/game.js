@@ -1,3 +1,4 @@
+// game.js
 // Game State
 let gameState = {
     attacker: null,
@@ -15,10 +16,171 @@ let gameState = {
 let playerId = null;
 let playerName = '';
 let playerRole = null; // 'attacker' or 'defender'
+let roomCode = null;
 let selectedUnit = null;
 let ws = null;
 let reconnectInterval = null;
-let gameTime = 0;
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+
+// -------------------------------------------------------
+// --- PERBAIKAN: MEMINDAHKAN FUNGSI UTILITAS KE ATAS ---
+// -------------------------------------------------------
+
+function updateConnectionStatus(connected) {
+    const statusEl = document.getElementById('connectionStatus');
+    // Tambahkan cek null karena elemen ini mungkin belum dimuat saat awal koneksi
+    if (!statusEl) return; 
+
+    if (connected) {
+        statusEl.className = 'flex items-center gap-2 px-4 py-2 bg-green-100 text-green-700 rounded-full font-semibold';
+        statusEl.innerHTML = '<span class="w-3 h-3 bg-green-500 rounded-full pulse"></span> Connected';
+    } else {
+        statusEl.className = 'flex items-center gap-2 px-4 py-2 bg-red-100 text-red-700 rounded-full font-semibold';
+        statusEl.innerHTML = '<span class="w-3 h-3 bg-red-500 rounded-full"></span> Disconnected';
+    }
+}
+
+function updateUI() {
+    // PERBAIKAN: Cek apakah Game Container sudah terlihat. 
+    // Jika tidak, jangan coba mengakses elemen di dalamnya.
+    const gameContainer = document.getElementById('gameContainer');
+    if (gameContainer && gameContainer.classList.contains('hidden')) {
+        // Hanya update status jika perlu
+        const statusText = document.getElementById('statusText');
+        if (statusText) statusText.textContent = 'Waiting'; 
+        return; 
+    }
+
+    // Perbaikan untuk mencegah 'Cannot set properties of null'
+    // Menggunakan optional chaining (`?.`) atau pengecekan if eksplisit
+    const attackerGoldEl = document.getElementById('attackerGold');
+    if (attackerGoldEl) attackerGoldEl.textContent = gameState.attackerGold;
+    
+    const defenderGoldEl = document.getElementById('defenderGold');
+    if (defenderGoldEl) defenderGoldEl.textContent = gameState.defenderGold;
+    
+    const defenderHPEl = document.getElementById('defenderHP');
+    if (defenderHPEl) defenderHPEl.textContent = gameState.baseHP;
+    
+    const attackerTroopsEl = document.getElementById('attackerTroops');
+    if (attackerTroopsEl) attackerTroopsEl.textContent = gameState.troops.length;
+    
+    const attackerNameEl = document.getElementById('attackerName');
+    if (attackerNameEl) attackerNameEl.textContent = gameState.attacker ? gameState.attacker.name : 'Waiting...';
+    
+    const defenderNameEl = document.getElementById('defenderName');
+    if (defenderNameEl) defenderNameEl.textContent = gameState.defender ? gameState.defender.name : 'Waiting...';
+    
+    const statusText = document.getElementById('statusText');
+    if (statusText) {
+        if (gameState.gameStatus === 'waiting') {
+            statusText.textContent = 'Waiting';
+            statusText.className = 'font-bold text-yellow-600';
+            document.getElementById('waitingModal')?.classList.remove('hidden');
+        } else if (gameState.gameStatus === 'playing') {
+            statusText.textContent = 'Playing';
+            statusText.className = 'font-bold text-green-600';
+            document.getElementById('waitingModal')?.classList.add('hidden');
+
+            // Update game time (countdown is actually elapsed time)
+            const countdownEl = document.getElementById('countdown');
+            if (countdownEl && gameState.gameStartTime) {
+                const elapsed = Math.floor((Date.now() - gameState.gameStartTime) / 1000);
+                const mins = Math.floor(elapsed / 60);
+                const secs = elapsed % 60;
+                countdownEl.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+            }
+        } else {
+            statusText.textContent = 'Finished';
+            statusText.className = 'font-bold text-red-600';
+        }
+    }
+}
+
+function addMessage(text, type = 'info') {
+    const log = document.getElementById('messageLog');
+    if (!log) return; // Tambahkan cek null
+
+    const msg = document.createElement('div');
+    msg.className = 'text-sm p-2 rounded-lg';
+    
+    const colors = {
+        system: 'bg-blue-100 text-blue-800',
+        join: 'bg-green-100 text-green-800',
+        tower: 'bg-purple-100 text-purple-800',
+        success: 'bg-yellow-100 text-yellow-800',
+        chat: 'bg-gray-100 text-gray-800',
+        error: 'bg-red-100 text-red-800'
+    };
+    
+    msg.className += ' ' + (colors[type] || 'bg-gray-100 text-gray-800');
+    msg.textContent = text;
+    
+    log.appendChild(msg);
+    log.scrollTop = log.scrollHeight;
+}
+
+// WebSocket Connection
+function connectWebSocket(callback) {
+    const wsUrl = CONFIG.WS_URL;
+    
+    try {
+        ws = new WebSocket(wsUrl);
+        
+        ws.onopen = () => {
+            console.log('Connected to server');
+            // PERBAIKAN: updateConnectionStatus sudah dipindahkan ke atas
+            updateConnectionStatus(true); 
+            addMessage('Connected to server!', 'system');
+            
+            if (reconnectInterval) {
+                clearInterval(reconnectInterval);
+                reconnectInterval = null;
+            }
+
+            if (callback) callback();
+        };
+        
+        ws.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                handleServerMessage(data);
+            } catch (error) {
+                console.error('Error parsing message:', error);
+            }
+        };
+        
+        ws.onerror = (error) => {
+            console.error('WebSocket error:', error);
+            updateConnectionStatus(false);
+            addMessage('Connection error', 'error');
+        };
+        
+        ws.onclose = () => {
+            console.log('Disconnected');
+            updateConnectionStatus(false);
+            
+            if (!reconnectInterval) {
+                reconnectInterval = setInterval(() => {
+                    console.log('Attempting to reconnect...');
+                    // Hanya connect, jangan coba create/join ulang di sini
+                    connectWebSocket(); 
+                }, 3000);
+            }
+        };
+    } catch (error) {
+        console.error('Failed to connect:', error);
+        updateConnectionStatus(false);
+    }
+}
+
+
+// -------------------------------------------------------
+// --- SISA KODE DARI SINI KE BAWAH TIDAK BERUBAH ---
+// -------------------------------------------------------
 
 // Troop Types (for Attacker)
 const TROOP_TYPES = {
@@ -110,23 +272,21 @@ const TOWER_TYPES = {
     }
 };
 
-const canvas = document.getElementById('gameCanvas');
-const ctx = canvas.getContext('2d');
 
 // 3 PATHS (Top, Middle, Bottom)
 const PATHS = [
-    // Path 1 (Top Lane)
+    // Path 1 (Top Lane) - Purple
     [
         {x: 0, y: 150}, {x: 300, y: 150}, {x: 300, y: 100}, 
         {x: 600, y: 100}, {x: 600, y: 150}, {x: 900, y: 150}
     ],
-    // Path 2 (Middle Lane)
+    // Path 2 (Middle Lane) - Pink
     [
         {x: 0, y: 350}, {x: 200, y: 350}, {x: 200, y: 300},
         {x: 450, y: 300}, {x: 450, y: 400}, {x: 700, y: 400},
         {x: 700, y: 350}, {x: 900, y: 350}
     ],
-    // Path 3 (Bottom Lane)
+    // Path 3 (Bottom Lane) - Orange
     [
         {x: 0, y: 550}, {x: 300, y: 550}, {x: 300, y: 600},
         {x: 600, y: 600}, {x: 600, y: 550}, {x: 900, y: 550}
@@ -136,61 +296,11 @@ const PATHS = [
 // Base position
 const BASE_POS = {x: 900, y: 350};
 
-// WebSocket Connection
-function connectWebSocket() {
-    const wsUrl = CONFIG.WS_URL;
-    
-    try {
-        ws = new WebSocket(wsUrl);
-        
-        ws.onopen = () => {
-            console.log('Connected to server');
-            updateConnectionStatus(true);
-            addMessage('Connected to server!', 'system');
-            
-            if (reconnectInterval) {
-                clearInterval(reconnectInterval);
-                reconnectInterval = null;
-            }
-        };
-        
-        ws.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                handleServerMessage(data);
-            } catch (error) {
-                console.error('Error parsing message:', error);
-            }
-        };
-        
-        ws.onerror = (error) => {
-            console.error('WebSocket error:', error);
-            addMessage('Connection error', 'error');
-        };
-        
-        ws.onclose = () => {
-            console.log('Disconnected');
-            updateConnectionStatus(false);
-            
-            if (!reconnectInterval) {
-                reconnectInterval = setInterval(() => {
-                    connectWebSocket();
-                }, 3000);
-            }
-        };
-    } catch (error) {
-        console.error('Failed to connect:', error);
-    }
-}
+// --- WEBSOCKET & SERVER COMMUNICATION ---
 
-function updateConnectionStatus(connected) {
-    const statusEl = document.getElementById('connectionStatus');
-    if (connected) {
-        statusEl.className = 'flex items-center gap-2 px-4 py-2 bg-green-100 text-green-700 rounded-full font-semibold';
-        statusEl.innerHTML = '<span class="w-3 h-3 bg-green-500 rounded-full pulse"></span> Connected';
-    } else {
-        statusEl.className = 'flex items-center gap-2 px-4 py-2 bg-red-100 text-red-700 rounded-full font-semibold';
-        statusEl.innerHTML = '<span class="w-3 h-3 bg-red-500 rounded-full"></span> Disconnected';
+function sendToServer(data) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(data));
     }
 }
 
@@ -198,6 +308,29 @@ function handleServerMessage(data) {
     switch(data.type) {
         case 'gameState':
             gameState = { ...gameState, ...data.data };
+            updateUI();
+            break;
+
+        case 'roomCreated':
+        case 'roomJoined':
+            // Used for initial setup/transition after connecting
+            roomCode = data.roomCode;
+            playerId = data.playerId;
+            playerRole = data.role;
+            gameState = { ...gameState, ...data.data };
+            
+            document.getElementById('displayRoomCode').textContent = roomCode;
+            document.getElementById('mainMenu').classList.add('hidden');
+            document.getElementById('createMatchModal').classList.add('hidden');
+            document.getElementById('joinMatchModal').classList.add('hidden');
+            document.getElementById('gameContainer').classList.remove('hidden');
+
+            setupPlayerRoleUI(playerRole);
+            
+            if (data.type === 'roomCreated' && gameState.gameStatus === 'waiting') {
+                document.getElementById('waitingModal').classList.remove('hidden');
+            }
+
             updateUI();
             break;
             
@@ -215,11 +348,12 @@ function handleServerMessage(data) {
             gameState.gameStatus = 'playing';
             gameState.gameStartTime = Date.now();
             addMessage('⚔️ Game Started! Battle begins!', 'success');
-            document.getElementById('waitingModal').classList.add('hidden');
+            document.getElementById('waitingModal')?.classList.add('hidden');
             updateUI();
             break;
             
         case 'troopDeployed':
+            // Only update if not the sender (sender updates locally before sending)
             if (data.playerId !== playerId) {
                 gameState.troops.push(data.troop);
                 gameState.attackerGold = data.gold;
@@ -228,6 +362,7 @@ function handleServerMessage(data) {
             break;
             
         case 'towerPlaced':
+            // Only update if not the sender
             if (data.playerId !== playerId) {
                 gameState.towers.push(data.tower);
                 gameState.defenderGold = data.gold;
@@ -243,10 +378,7 @@ function handleServerMessage(data) {
             
         case 'gameOver':
             gameState.gameStatus = 'finished';
-            addMessage(`🏆 ${data.winner} wins!`, 'success');
-            setTimeout(() => {
-                alert(`Game Over! Winner: ${data.winner}\nReason: ${data.reason}`);
-            }, 1000);
+            showGameOverModal(data.winner, data.reason);
             break;
             
         case 'chat':
@@ -261,56 +393,24 @@ function handleServerMessage(data) {
                 gameState.gameStatus = 'finished';
                 addMessage('Game ended - opponent disconnected', 'error');
             }
+            if (data.role === 'attacker') gameState.attacker = null;
+            if (data.role === 'defender') gameState.defender = null;
+            updateUI();
+            break;
+
+        case 'error':
+            alert(`Error: ${data.message}`);
+            returnToMenu();
+            break;
+
+        case 'gameReset':
+            alert('Server reset. Returning to menu.');
+            returnToMenu();
             break;
     }
 }
 
-function sendToServer(data) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify(data));
-    }
-}
-
-function selectRole(role) {
-    const nameInput = document.getElementById('playerNameInput');
-    playerName = nameInput.value.trim();
-    
-    if (!playerName) {
-        alert('Please enter your name!');
-        return;
-    }
-
-    playerRole = role;
-    playerId = 'player_' + Date.now();
-    
-    document.getElementById('roleModal').style.display = 'none';
-    document.getElementById('waitingModal').classList.remove('hidden');
-    
-    // Update role display
-    const roleEl = document.getElementById('playerRole');
-    if (role === 'attacker') {
-        roleEl.className = 'px-4 py-2 rounded-full font-bold text-white role-attacker';
-        roleEl.textContent = '⚔️ Attacker';
-        document.getElementById('attackerUnits').classList.remove('hidden');
-    } else {
-        roleEl.className = 'px-4 py-2 rounded-full font-bold text-white role-defender';
-        roleEl.textContent = '🛡️ Defender';
-        document.getElementById('defenderUnits').classList.remove('hidden');
-    }
-    
-    connectWebSocket();
-    
-    setTimeout(() => {
-        sendToServer({
-            type: 'playerJoined',
-            playerId: playerId,
-            playerName: playerName,
-            role: role
-        });
-    }, 500);
-
-    startGameLoop();
-}
+// --- GAME LOGIC ---
 
 function selectUnit(type) {
     selectedUnit = type;
@@ -322,6 +422,7 @@ function selectUnit(type) {
 
 canvas.addEventListener('click', (e) => {
     if (!selectedUnit || gameState.gameStatus !== 'playing') return;
+    if (playerRole !== 'attacker' && playerRole !== 'defender') return;
     
     const rect = canvas.getBoundingClientRect();
     const x = (e.clientX - rect.left) * (canvas.width / rect.width);
@@ -343,12 +444,15 @@ function deployTroop(x, y) {
     
     // Detect which lane was clicked
     let lane = -1;
-    if (y < 250) lane = 0; // Top
-    else if (y < 450) lane = 1; // Middle
-    else lane = 2; // Bottom
+    if (y > 100 && y < 200) lane = 0; // Top Lane area
+    else if (y > 300 && y < 400) lane = 1; // Middle Lane area
+    else if (y > 500 && y < 600) lane = 2; // Bottom Lane area
     
-    if (lane === -1) return;
-    
+    if (lane === -1) {
+        addMessage('Click closer to a lane to deploy troops!', 'error');
+        return;
+    }
+
     const path = PATHS[lane];
     const troop = {
         id: 'troop_' + Date.now(),
@@ -362,12 +466,12 @@ function deployTroop(x, y) {
         y: path[0].y
     };
     
+    // Client-side update (will be confirmed by server broadcast)
     gameState.troops.push(troop);
     gameState.attackerGold -= troopType.cost;
     
     sendToServer({
         type: 'troopDeployed',
-        playerId: playerId,
         troop: troop,
         gold: gameState.attackerGold
     });
@@ -383,9 +487,14 @@ function placeTower(x, y) {
         return;
     }
     
-    // Check if on path
-    if (isOnAnyPath(x, y, 40)) {
-        addMessage('Cannot place tower on path!', 'error');
+    // Check if too close to path or other towers
+    if (isOnAnyPath(x, y, 30)) {
+        addMessage('Cannot place tower too close to path!', 'error');
+        return;
+    }
+
+    if (isTooCloseToOtherTowers(x, y, 40)) {
+        addMessage('Cannot place tower too close to another tower!', 'error');
         return;
     }
     
@@ -397,18 +506,26 @@ function placeTower(x, y) {
         lastShot: 0
     };
     
+    // Client-side update
     gameState.towers.push(tower);
     gameState.defenderGold -= towerType.cost;
     
     sendToServer({
         type: 'towerPlaced',
-        playerId: playerId,
         tower: tower,
         gold: gameState.defenderGold
     });
     
     addMessage(`Placed ${towerType.name}`, 'tower');
     updateUI();
+}
+
+function isTooCloseToOtherTowers(x, y, minDistance) {
+    for (const tower of gameState.towers) {
+        const dist = Math.sqrt((tower.x - x)**2 + (tower.y - y)**2);
+        if (dist < minDistance) return true;
+    }
+    return false;
 }
 
 function isOnAnyPath(x, y, threshold) {
@@ -424,16 +541,138 @@ function isOnAnyPath(x, y, threshold) {
 function distanceToLineSegment(px, py, x1, y1, x2, y2) {
     const dx = x2 - x1;
     const dy = y2 - y1;
-    const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)));
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq === 0) return Math.sqrt((px - x1)**2 + (py - y1)**2);
+    
+    const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
     const closestX = x1 + t * dx;
     const closestY = y1 + t * dy;
     return Math.sqrt((px - closestX) ** 2 + (py - closestY) ** 2);
 }
 
 function gameLoop() {
+    if (gameState.gameStatus !== 'playing') {
+        updateUI(); 
+        return;
+    }
+
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     
-    // Draw paths
+    // Draw paths and base
+    drawGameMap();
+    
+    // Update and draw troops
+    for (let i = gameState.troops.length - 1; i >= 0; i--) {
+        const troop = gameState.troops[i];
+        const troopType = TROOP_TYPES[troop.type];
+        const path = PATHS[troop.lane];
+        
+        // --- MOVEMENT LOGIC ---
+        if (troop.pathIndex < path.length - 1) {
+            const current = path[troop.pathIndex];
+            const next = path[troop.pathIndex + 1];
+            const dx = next.x - current.x;
+            const dy = next.y - current.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            
+            troop.progress += troopType.speed;
+            
+            if (distance > 0 && troop.progress >= distance) {
+                troop.progress -= distance;
+                troop.pathIndex++;
+            }
+            
+            // Recalculate position
+            const segmentStart = path[troop.pathIndex];
+            const segmentEnd = path[troop.pathIndex + 1] || BASE_POS; // Use BASE_POS for last segment
+            const segDx = segmentEnd.x - segmentStart.x;
+            const segDy = segmentEnd.y - segmentStart.y;
+            const segmentDist = Math.sqrt(segDx * segDx + segDy * segDy) || 1; 
+
+            const t = troop.progress / segmentDist;
+            troop.x = segmentStart.x + segDx * t;
+            troop.y = segmentStart.y + segDy * t;
+            
+        } else {
+            // Reached base logic
+            if (Math.abs(troop.x - BASE_POS.x) < 5 && Math.abs(troop.y - BASE_POS.y) < 5) {
+                let damage = troopType.damage;
+                gameState.baseHP -= damage;
+                gameState.troops.splice(i, 1);
+                
+                // Only Attacker updates the server with base hit
+                if (playerRole === 'attacker') {
+                    sendToServer({
+                        type: 'baseHit',
+                        baseHP: gameState.baseHP,
+                        damage: damage
+                    });
+                }
+                
+                if (gameState.baseHP <= 0) {
+                    gameState.gameStatus = 'finished';
+                    // Attacker sends game over signal
+                    if (playerRole === 'attacker') {
+                        sendToServer({
+                            type: 'gameOver',
+                            winner: 'Attacker',
+                            reason: 'Base destroyed'
+                        });
+                    }
+                }
+                continue;
+            } else {
+                 // Move towards the base from the last path point
+                const lastPoint = path[path.length - 1];
+                const dx = BASE_POS.x - lastPoint.x;
+                const dy = BASE_POS.y - lastPoint.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                troop.x += (dx / dist) * troopType.speed;
+                troop.y += (dy / dist) * troopType.speed;
+            }
+        }
+        
+        drawTroop(troop, troopType);
+    }
+    
+    // Update and draw towers (shooting logic)
+    const now = Date.now();
+    gameState.towers.forEach(tower => {
+        const towerType = TOWER_TYPES[tower.type];
+        drawTower(tower, towerType);
+        
+        // Find and shoot troops
+        if (now - tower.lastShot >= towerType.speed) {
+            let target = findTarget(tower, towerType.range);
+            
+            if (target) {
+                tower.lastShot = now;
+                gameState.projectiles.push({
+                    x: tower.x,
+                    y: tower.y,
+                    targetX: target.x,
+                    targetY: target.y,
+                    target: target,
+                    damage: towerType.damage,
+                    color: towerType.color,
+                    type: tower.type,
+                    splashRadius: towerType.splashRadius || 0,
+                    speed: 8
+                });
+            }
+        }
+    });
+    
+    // Update and draw projectiles (and damage troops)
+    updateProjectiles();
+    
+    updateUI();
+}
+
+// --- DRAWING FUNCTIONS ---
+
+function drawGameMap() {
     PATHS.forEach((path, idx) => {
         const colors = ['#a78bfa', '#f472b6', '#fb923c'];
         ctx.strokeStyle = colors[idx];
@@ -447,7 +686,6 @@ function gameLoop() {
         }
         ctx.stroke();
         
-        // Lane number
         ctx.fillStyle = 'white';
         ctx.font = 'bold 16px Arial';
         ctx.fillText(`Lane ${idx + 1}`, 10, path[0].y - 30);
@@ -461,175 +699,133 @@ function gameLoop() {
     ctx.fillStyle = 'white';
     ctx.font = 'bold 20px Arial';
     ctx.textAlign = 'center';
-    ctx.fillText('🏰', BASE_POS.x, BASE_POS.y + 8);
+    ctx.textBaseline = 'middle';
+    ctx.fillText('🏰', BASE_POS.x, BASE_POS.y);
     
     // Base HP bar
     ctx.fillStyle = '#000';
     ctx.fillRect(BASE_POS.x - 40, BASE_POS.y - 50, 80, 8);
-    ctx.fillStyle = '#10b981';
+    ctx.fillStyle = (gameState.baseHP > 50 ? '#10b981' : (gameState.baseHP > 20 ? '#fbbf24' : '#ef4444'));
     ctx.fillRect(BASE_POS.x - 40, BASE_POS.y - 50, 80 * (gameState.baseHP / 100), 8);
     ctx.fillStyle = 'white';
     ctx.font = 'bold 12px Arial';
     ctx.fillText(`${gameState.baseHP}HP`, BASE_POS.x, BASE_POS.y - 60);
+}
+
+function drawTroop(troop, troopType) {
+     // Draw troop
+    ctx.fillStyle = troopType.color;
+    ctx.beginPath();
+    ctx.arc(troop.x, troop.y, troopType.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${troopType.size + 4}px Arial`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(troopType.emoji, troop.x, troop.y);
     
-    // Update and draw troops
-    for (let i = gameState.troops.length - 1; i >= 0; i--) {
-        const troop = gameState.troops[i];
-        const troopType = TROOP_TYPES[troop.type];
-        const path = PATHS[troop.lane];
-        
-        if (troop.pathIndex < path.length - 1) {
-            const current = path[troop.pathIndex];
-            const next = path[troop.pathIndex + 1];
-            const dx = next.x - current.x;
-            const dy = next.y - current.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
-            
-            troop.progress += troopType.speed;
-            
-            if (troop.progress >= distance) {
-                troop.progress = 0;
-                troop.pathIndex++;
-            }
-            
-            const t = troop.progress / distance;
-            troop.x = current.x + dx * t;
-            troop.y = current.y + dy * t;
-        } else {
-            // Reached base
-            let damage = troopType.damage;
-            if (troopType.explosive) {
-                damage = troopType.damage; // Bomber deals full damage
-            }
-            
-            gameState.baseHP -= damage;
-            gameState.troops.splice(i, 1);
-            
-            if (playerRole === 'attacker') {
-                sendToServer({
-                    type: 'baseHit',
-                    baseHP: gameState.baseHP,
-                    damage: damage
-                });
-            }
-            
-            if (gameState.baseHP <= 0) {
-                gameState.gameStatus = 'finished';
-                sendToServer({
-                    type: 'gameOver',
-                    winner: 'Attacker',
-                    reason: 'Base destroyed'
-                });
-            }
-            continue;
-        }
-        
-        // Draw troop
-        ctx.fillStyle = troopType.color;
-        ctx.beginPath();
-        ctx.arc(troop.x, troop.y, troopType.size, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#fff';
-        ctx.font = `bold ${troopType.size + 4}px Arial`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(troopType.emoji, troop.x, troop.y);
-        
-        // Health bar
-        if (troop.health < troop.maxHealth) {
-            ctx.fillStyle = '#000';
-            ctx.fillRect(troop.x - 15, troop.y - troopType.size - 10, 30, 4);
-            ctx.fillStyle = '#10b981';
-            ctx.fillRect(troop.x - 15, troop.y - troopType.size - 10, 30 * (troop.health / troop.maxHealth), 4);
-        }
+    // Health bar
+    if (troop.health < troop.maxHealth) {
+        ctx.fillStyle = '#000';
+        ctx.fillRect(troop.x - 15, troop.y - troopType.size - 10, 30, 4);
+        ctx.fillStyle = (troop.health/troop.maxHealth > 0.5 ? '#10b981' : (troop.health/troop.maxHealth > 0.2 ? '#fbbf24' : '#ef4444'));
+        ctx.fillRect(troop.x - 15, troop.y - troopType.size - 10, 30 * (troop.health / troop.maxHealth), 4);
     }
+}
+
+function drawTower(tower, towerType) {
+    // Draw tower
+    ctx.fillStyle = towerType.color;
+    ctx.beginPath();
+    ctx.arc(tower.x, tower.y, 15, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 16px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(towerType.emoji, tower.x, tower.y);
     
-    // Update and draw towers
-    const now = Date.now();
-    gameState.towers.forEach(tower => {
-        const towerType = TOWER_TYPES[tower.type];
-        
-        // Draw tower
-        ctx.fillStyle = towerType.color;
-        ctx.beginPath();
-        ctx.arc(tower.x, tower.y, 15, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.fillStyle = '#fff';
-        ctx.font = 'bold 16px Arial';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(towerType.emoji, tower.x, tower.y);
-        
-        // Draw range
-        ctx.strokeStyle = towerType.color + '22';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.arc(tower.x, tower.y, towerType.range, 0, Math.PI * 2);
-        ctx.stroke();
-        
-        // Find and shoot troops
-        if (now - tower.lastShot >= towerType.speed) {
-            let target = null;
-            let maxProgress = -1;
-            
-            gameState.troops.forEach(troop => {
-                const dist = Math.sqrt((troop.x - tower.x) ** 2 + (troop.y - tower.y) ** 2);
-                const progress = troop.pathIndex * 1000 + troop.progress;
-                if (dist <= towerType.range && progress > maxProgress) {
-                    target = troop;
-                    maxProgress = progress;
-                }
-            });
-            
-            if (target) {
-                tower.lastShot = now;
-                gameState.projectiles.push({
-                    x: tower.x,
-                    y: tower.y,
-                    targetX: target.x,
-                    targetY: target.y,
-                    target: target,
-                    damage: towerType.damage,
-                    color: towerType.color,
-                    type: tower.type,
-                    speed: 8
-                });
-            }
+    // Draw range
+    ctx.strokeStyle = towerType.color + '22';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(tower.x, tower.y, towerType.range, 0, Math.PI * 2);
+    ctx.stroke();
+}
+
+function findTarget(tower, range) {
+    let target = null;
+    let maxProgress = -1;
+    
+    gameState.troops.forEach(troop => {
+        const dist = Math.sqrt((troop.x - tower.x) ** 2 + (troop.y - tower.y) ** 2);
+        // Prioritize troops that have progressed the furthest down their path
+        const path = PATHS[troop.lane];
+        const currentSegmentLength = Math.sqrt(
+            (path[troop.pathIndex+1].x - path[troop.pathIndex].x)**2 + 
+            (path[troop.pathIndex+1].y - path[troop.pathIndex].y)**2
+        );
+
+        let progress;
+        // Estimate overall progress (rough calculation, actual implementation may vary)
+        if (troop.pathIndex < path.length - 1) {
+             progress = troop.pathIndex * 1000 + (troop.progress / (currentSegmentLength || 1)) * 1000;
+        } else {
+             progress = path.length * 1000 + 100; // Troops at the end are highest priority
+        }
+
+        if (dist <= range && progress > maxProgress) {
+            target = troop;
+            maxProgress = progress;
         }
     });
-    
-    // Update and draw projectiles
+    return target;
+}
+
+function updateProjectiles() {
     for (let i = gameState.projectiles.length - 1; i >= 0; i--) {
         const proj = gameState.projectiles[i];
+        
+        // Find the troop that corresponds to the projectile's target
+        const targetTroop = gameState.troops.find(t => t.id === proj.target.id);
+
+        // If target is gone, but projectile still moving, let it hit the last known coordinates
+        if (targetTroop) {
+             proj.targetX = targetTroop.x;
+             proj.targetY = targetTroop.y;
+        }
+
         const dx = proj.targetX - proj.x;
         const dy = proj.targetY - proj.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
-        
+
         if (dist < proj.speed) {
-            // Hit
+            // Hit logic
             if (proj.type === 'splash') {
+                const splashCenter = { x: proj.targetX, y: proj.targetY };
                 gameState.troops.forEach(troop => {
-                    const d = Math.sqrt((troop.x - proj.targetX) ** 2 + (troop.y - proj.targetY) ** 2);
-                    if (d <= 50) {
+                    const d = Math.sqrt((troop.x - splashCenter.x) ** 2 + (troop.y - splashCenter.y) ** 2);
+                    if (d <= proj.splashRadius) {
                         troop.health -= proj.damage;
                     }
                 });
-            } else {
-                proj.target.health -= proj.damage;
+            } else if (targetTroop) {
+                targetTroop.health -= proj.damage;
             }
             
-            // Remove dead troops
+            // Remove dead troops and award gold (only Defender updates client gold)
             for (let j = gameState.troops.length - 1; j >= 0; j--) {
                 if (gameState.troops[j].health <= 0) {
                     gameState.troops.splice(j, 1);
                     if (playerRole === 'defender') {
-                        gameState.defenderGold += 5;
+                        gameState.defenderGold += 5; // Reward for kill
                     }
                 }
             }
             
             gameState.projectiles.splice(i, 1);
         } else {
+            // Move projectile
             proj.x += (dx / dist) * proj.speed;
             proj.y += (dy / dist) * proj.speed;
             
@@ -640,74 +836,37 @@ function gameLoop() {
             ctx.fill();
         }
     }
-    
-    updateUI();
 }
 
-function updateUI() {
-    document.getElementById('attackerGold').textContent = gameState.attackerGold;
-    document.getElementById('defenderGold').textContent = gameState.defenderGold;
-    document.getElementById('defenderHP').textContent = gameState.baseHP;
-    document.getElementById('attackerTroops').textContent = gameState.troops.length;
-    
-    if (gameState.attacker) {
-        document.getElementById('attackerName').textContent = gameState.attacker.name;
-    }
-    if (gameState.defender) {
-        document.getElementById('defenderName').textContent = gameState.defender.name;
-    }
-    
-    const statusText = document.getElementById('statusText');
-    if (gameState.gameStatus === 'waiting') {
-        statusText.textContent = 'Waiting';
-        statusText.className = 'font-bold text-yellow-600';
-    } else if (gameState.gameStatus === 'playing') {
-        statusText.textContent = 'Playing';
-        statusText.className = 'font-bold text-green-600';
-        
-        // Update game time
-        if (gameState.gameStartTime) {
-            const elapsed = Math.floor((Date.now() - gameState.gameStartTime) / 1000);
-            const mins = Math.floor(elapsed / 60);
-            const secs = elapsed % 60;
-            document.getElementById('gameTime').textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
-        }
+
+// --- UI/CHAT FUNCTIONS ---
+
+function setupPlayerRoleUI(role) {
+    const roleEl = document.getElementById('playerRole');
+    document.getElementById('attackerUnits').classList.add('hidden');
+    document.getElementById('defenderUnits').classList.add('hidden');
+
+    if (role === 'attacker') {
+        roleEl.className = 'px-4 py-2 rounded-full font-bold text-white role-attacker';
+        roleEl.textContent = '⚔️ Attacker';
+        document.getElementById('attackerUnits').classList.remove('hidden');
+    } else if (role === 'defender') {
+        roleEl.className = 'px-4 py-2 rounded-full font-bold text-white role-defender';
+        roleEl.textContent = '🛡️ Defender';
+        document.getElementById('defenderUnits').classList.remove('hidden');
     } else {
-        statusText.textContent = 'Finished';
-        statusText.className = 'font-bold text-red-600';
+         roleEl.className = 'px-4 py-2 rounded-full font-bold text-white bg-gray-500';
+         roleEl.textContent = '👤 Spectator';
     }
-}
-
-function addMessage(text, type = 'info') {
-    const log = document.getElementById('messageLog');
-    const msg = document.createElement('div');
-    msg.className = 'text-sm p-2 rounded-lg';
-    
-    const colors = {
-        system: 'bg-blue-100 text-blue-800',
-        join: 'bg-green-100 text-green-800',
-        tower: 'bg-purple-100 text-purple-800',
-        success: 'bg-yellow-100 text-yellow-800',
-        chat: 'bg-gray-100 text-gray-800',
-        error: 'bg-red-100 text-red-800'
-    };
-    
-    msg.className += ' ' + (colors[type] || colors.info);
-    msg.textContent = text;
-    
-    log.appendChild(msg);
-    log.scrollTop = log.scrollHeight;
 }
 
 function sendChat() {
     const input = document.getElementById('chatInput');
     const message = input.value.trim();
     
-    if (message) {
+    if (message && playerId) {
         sendToServer({
             type: 'chat',
-            playerId: playerId,
-            playerName: playerName,
             message: message
         });
         
@@ -720,4 +879,155 @@ function startGameLoop() {
     setInterval(gameLoop, 1000 / 60);
 }
 
-updateUI();
+// --- MENU/MODAL FUNCTIONS ---
+
+function showRoleModal() {
+    document.getElementById('mainMenu').classList.add('hidden');
+    document.getElementById('roleModal').style.display = 'flex';
+}
+
+let selectedCreateRole = null;
+function selectCreateRole(role) {
+    selectedCreateRole = role;
+    document.getElementById('createAttacker').classList.remove('selected');
+    document.getElementById('createDefender').classList.remove('selected');
+    document.getElementById(`create${role.charAt(0).toUpperCase() + role.slice(1)}`).classList.add('selected');
+}
+
+function showCreateMatch() {
+    const playerNameMenu = document.getElementById('playerNameMenu').value.trim();
+    if (!playerNameMenu) {
+        alert('Please enter your name first!');
+        return;
+    }
+    document.getElementById('createName').value = playerNameMenu;
+    selectedCreateRole = null; // Reset selection
+    document.getElementById('createAttacker').classList.remove('selected');
+    document.getElementById('createDefender').classList.remove('selected');
+
+    document.getElementById('mainMenu').classList.add('hidden');
+    document.getElementById('createMatchModal').classList.remove('hidden');
+}
+
+function showJoinMatch() {
+    const playerNameMenu = document.getElementById('playerNameMenu').value.trim();
+    if (!playerNameMenu) {
+        alert('Please enter your name first!');
+        return;
+    }
+    document.getElementById('joinName').value = playerNameMenu;
+    document.getElementById('roomCodeInput').value = ''; // Clear room code
+    document.getElementById('mainMenu').classList.add('hidden');
+    document.getElementById('joinMatchModal').classList.remove('hidden');
+}
+
+function backToMenu() {
+    document.getElementById('createMatchModal').classList.add('hidden');
+    document.getElementById('joinMatchModal').classList.add('hidden');
+    document.getElementById('mainMenu').classList.remove('hidden');
+}
+
+function createMatch() {
+    playerName = document.getElementById('createName').value.trim();
+    if (!playerName || !selectedCreateRole) {
+        alert('Please enter your name and select a role!');
+        return;
+    }
+
+    // Connect WebSocket dan kirim pesan 'createRoom' setelah koneksi terbuka
+    connectWebSocket(() => {
+        sendToServer({
+            type: 'createRoom',
+            playerName: playerName,
+            role: selectedCreateRole
+        });
+    });
+}
+
+function joinMatch() {
+    playerName = document.getElementById('joinName').value.trim();
+    roomCode = document.getElementById('roomCodeInput').value.trim().toUpperCase();
+    
+    if (!playerName || roomCode.length !== 6) {
+        alert('Please enter your name and a 6-digit room code!');
+        return;
+    }
+
+    // Connect WebSocket dan kirim pesan 'joinRoom' setelah koneksi terbuka
+    connectWebSocket(() => {
+        sendToServer({
+            type: 'joinRoom',
+            playerName: playerName,
+            roomCode: roomCode
+        });
+    });
+}
+
+function cancelWaiting() {
+    // Attempt to close WebSocket gracefully, which triggers handlePlayerDisconnect on server
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+    }
+    returnToMenu();
+}
+
+function showGameOverModal(winner, reason) {
+    document.getElementById('gameOverModal').classList.remove('hidden');
+    
+    const isWinner = playerRole && winner.toLowerCase() === playerRole;
+
+    document.getElementById('winnerText').textContent = isWinner ? 'VICTORY!' : 'DEFEAT!';
+    document.getElementById('winnerEmoji').textContent = isWinner ? '🏆' : '💀';
+    document.getElementById('gameResult').innerHTML = `
+        <p class="text-xl font-semibold mb-2">${winner} wins!</p>
+        <p>Reason: ${reason}</p>
+        <p class="mt-4">Final Base HP: ${gameState.baseHP}</p>
+        <p>Total Troops Deployed: ${gameState.troops.length}</p>
+    `;
+}
+
+function returnToMenu() {
+    // Reset client state
+    gameState = {
+        attacker: null,
+        defender: null,
+        attackerGold: 1000,
+        defenderGold: 1000,
+        baseHP: 100,
+        towers: [],
+        troops: [],
+        projectiles: [],
+        gameStatus: 'waiting',
+        gameStartTime: 0
+    };
+    playerId = null;
+    playerName = '';
+    playerRole = null;
+    roomCode = null;
+    selectedUnit = null;
+
+    // Show main menu and hide game elements
+    document.getElementById('gameContainer')?.classList.add('hidden');
+    document.getElementById('waitingModal')?.classList.add('hidden');
+    document.getElementById('gameOverModal')?.classList.add('hidden');
+    document.getElementById('mainMenu').classList.remove('hidden');
+    
+    const messageLog = document.getElementById('messageLog');
+    if (messageLog) messageLog.innerHTML = '<div class="text-gray-500 text-xs">Game ready...</div>';
+    
+    updateUI(); // Panggil updateUI untuk reset display jika gameContainer tidak hidden
+}
+
+// Attach public functions to window object for HTML access
+window.selectUnit = selectUnit;
+window.sendChat = sendChat;
+window.showCreateMatch = showCreateMatch;
+window.showJoinMatch = showJoinMatch;
+window.createMatch = createMatch;
+window.joinMatch = joinMatch;
+window.backToMenu = backToMenu;
+window.selectCreateRole = selectCreateRole;
+window.cancelWaiting = cancelWaiting;
+window.returnToMenu = returnToMenu;
+
+startGameLoop(); // Start the visual update loop
