@@ -20,7 +20,7 @@ let gameState = {
 };
 
 // User & Connection State
-let currentUser = null; // Menyimpan data user yang login { username: "Adi" }
+let currentUser = null; // Menyimpan data user yang login { id: 1, username: "Adi" }
 let ws = null;
 let reconnectInterval = null;
 
@@ -40,12 +40,45 @@ const ctx = canvas.getContext("2d");
 
 let authMode = "login"; // 'login' or 'register'
 
+// --- SESSION MANAGEMENT (LOCAL STORAGE) ---
+function saveSession(user) {
+  localStorage.setItem("td_session_id", user.id);
+  localStorage.setItem("td_session_username", user.username);
+}
+
+function clearSession() {
+  localStorage.removeItem("td_session_id");
+  localStorage.removeItem("td_session_username");
+}
+
+function checkSessionAndStart() {
+  const storedUsername = localStorage.getItem("td_session_username");
+  const storedId = localStorage.getItem("td_session_id");
+
+  // Jika ada sesi di localStorage
+  if (storedUsername && storedId) {
+    currentUser = { id: storedId, username: storedUsername };
+
+    // Langsung tampilkan dashboard, lalu coba koneksi WS & kirim getDashboard
+    document.getElementById("authScreen").classList.add("hidden");
+    document.getElementById("dashboardScreen").classList.remove("hidden");
+    document.getElementById("dashboardScreen").classList.add("flex");
+
+    // Koneksi dan segera minta data dashboard
+    connectWebSocket(requestDashboard);
+  } else {
+    // Jika tidak ada sesi, tampilkan login screen dan konek WS
+    document.getElementById("authScreen").classList.remove("hidden");
+    connectWebSocket();
+  }
+}
+// --- END SESSION MANAGEMENT ---
+
 function toggleAuth(mode) {
   authMode = mode;
   const btnText = mode === "login" ? "Login" : "Register";
-  document.getElementById("btnSubmitAuth").textContent = btnText;
+  document.getElementById("btnSubmitAuth").textContent = btnText; // Style Tabs Visual
 
-  // Style Tabs Visual
   if (mode === "login") {
     document.getElementById("tabLogin").className =
       "flex-1 py-2 rounded-md font-bold text-sm bg-white/10 text-white transition-all";
@@ -68,9 +101,8 @@ function submitAuth() {
     document.getElementById("authMessage").textContent =
       "Please fill all fields";
     return;
-  }
+  } // Pastikan WS terkoneksi sebelum kirim auth
 
-  // Pastikan WS terkoneksi sebelum kirim auth
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     connectWebSocket(() => {
       sendAuthRequest(username, password);
@@ -92,15 +124,18 @@ function requestDashboard() {
   sendToServer({ type: "getDashboard" });
 }
 
+function requestAvailableMatches() {
+  sendToServer({ type: "getAvailableMatches" });
+}
+
 function updateDashboardUI(stats, leaderboard) {
   // 1. Update Profile Stats
   document.getElementById("dashUsername").textContent = currentUser.username;
   document.getElementById("dashTrophies").textContent = stats.trophies;
   document.getElementById("dashWins").textContent = stats.wins;
   document.getElementById("dashLosses").textContent = stats.losses;
-  document.getElementById("dashMatches").textContent = stats.matches_played;
+  document.getElementById("dashMatches").textContent = stats.matches_played; // 2. Update Leaderboard Table
 
-  // 2. Update Leaderboard Table
   const tbody = document.getElementById("leaderboardBody");
   tbody.innerHTML = "";
 
@@ -118,17 +153,69 @@ function updateDashboardUI(stats, leaderboard) {
       if (index === 2) rankDisplay = "🥉";
 
       row.innerHTML = `
-                <td class="p-3 font-bold ${
-                  index < 3 ? "text-yellow-400" : "text-gray-400"
-                }">${rankDisplay}</td>
-                <td class="p-3 font-semibold text-white">${player.username}</td>
-                <td class="p-3 text-right font-bold text-yellow-400">${
-                  player.trophies
-                } 🏆</td>
-            `;
+                <td class="p-3 font-bold ${
+        index < 3 ? "text-yellow-400" : "text-gray-400"
+      }">${rankDisplay}</td>
+                <td class="p-3 font-semibold text-white">${player.username}</td>
+                <td class="p-3 text-right font-bold text-yellow-400">${
+        player.trophies
+      } 🏆</td>
+            `;
       tbody.appendChild(row);
     });
   }
+}
+
+function requestDashboard() {
+  sendToServer({ type: "getDashboard" });
+}
+
+function requestAvailableMatches() {
+  sendToServer({ type: "getAvailableMatches" });
+}
+
+function updateAvailableMatchesUI(matches) {
+  const tbody = document.getElementById("availableMatchesBody");
+  tbody.innerHTML = "";
+
+  if (matches.length === 0) {
+    tbody.innerHTML =
+      '<tr><td colspan="4" class="p-4 text-center text-gray-500">No available matches</td></tr>';
+  } else {
+    matches.forEach((match) => {
+      const row = document.createElement("tr");
+      row.className = "hover:bg-white/5 transition border-b border-white/5";
+
+      const timeAgo = getTimeAgo(new Date(match.created_at));
+      const roleNeeded =
+        match.needed_role === "attacker" ? "⚔️ Attacker" : "🛡️ Defender";
+      const roleColor =
+        match.needed_role === "attacker" ? "text-pink-400" : "text-blue-400";
+
+      row.innerHTML = `
+        <td class="p-3 font-mono font-bold text-purple-400">${match.room_code}</td>
+        <td class="p-3 text-white">${match.creator_name}</td>
+        <td class="p-3 ${roleColor} font-semibold">${roleNeeded}</td>
+        <td class="p-3 text-gray-400 text-xs">${timeAgo}</td>
+        <td class="p-3 text-right">
+          <button onclick="quickJoinMatch('${match.room_code}')" 
+                  class="bg-green-600 hover:bg-green-700 text-white px-4 py-1 rounded-lg text-sm font-bold transition">
+            Join
+          </button>
+        </td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+}
+
+function getTimeAgo(date) {
+  const seconds = Math.floor((new Date() - date) / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ago`;
 }
 
 // -------------------------------------------------------
@@ -138,11 +225,19 @@ function updateDashboardUI(stats, leaderboard) {
 function connectWebSocket(callback) {
   const wsUrl = CONFIG.WS_URL;
   ws = new WebSocket(wsUrl);
+  const storedId = localStorage.getItem("td_session_id");
 
   ws.onopen = () => {
     console.log("WS Connected");
     if (reconnectInterval) clearInterval(reconnectInterval);
-    if (callback) callback();
+    if (storedId) {
+      sendToServer({
+        type: "reauth",
+        id: storedId,
+      });
+    } else {
+      if (callback) callback();
+    }
   };
 
   ws.onmessage = (event) => {
@@ -155,8 +250,7 @@ function connectWebSocket(callback) {
   };
 
   ws.onclose = () => {
-    console.log("WS Disconnected");
-    // Auto reconnect logic
+    console.log("WS Disconnected"); // Auto reconnect logic
     if (!reconnectInterval) {
       reconnectInterval = setInterval(() => {
         console.log("Reconnecting...");
@@ -173,8 +267,9 @@ function sendToServer(data) {
 }
 
 function handleServerMessage(data) {
-  switch (data.type) {
-    // --- AUTH RESPONSES ---
+  switch (
+    data.type // --- AUTH RESPONSES ---
+  ) {
     case "registerSuccess":
       document.getElementById("authMessage").className =
         "text-center text-green-400 text-sm mt-4";
@@ -183,8 +278,8 @@ function handleServerMessage(data) {
       break;
 
     case "loginSuccess":
-      currentUser = { username: data.username };
-      // Sembunyikan Auth Screen, Tampilkan Dashboard
+      currentUser = { id: data.id, username: data.username }; // Simpan ID dari server
+      saveSession(currentUser); // Simpan sesi // Sembunyikan Auth Screen, Tampilkan Dashboard
       document.getElementById("authScreen").classList.add("hidden");
       document.getElementById("dashboardScreen").classList.remove("hidden");
       document.getElementById("dashboardScreen").classList.add("flex");
@@ -196,19 +291,31 @@ function handleServerMessage(data) {
       document.getElementById("authMessage").textContent = data.message;
       break;
 
-    case "dashboardData":
-      updateDashboardUI(data.stats, data.leaderboard);
+    case "reauthSuccess":
+      console.log("Re-authentication successful. Fetching dashboard data...");
+      if (data.roomCode && data.role) {
+        rejoinMatch(data.roomCode); // Jika sedang match, langsung rejoin
+      } else {
+        requestDashboard(); // Jika tidak ada match, tampilkan dashboard
+      }
       break;
 
-    // --- GAME ROOM RESPONSES ---
+    case "dashboardData":
+      updateDashboardUI(data.stats, data.leaderboard);
+      requestAvailableMatches(); // Panggil List Match setelah dashboard dimuat
+      break;
+
+    case "availableMatches":
+      updateAvailableMatchesUI(data.matches);
+      break;
+
     case "roomCreated":
     case "roomJoined":
       roomCode = data.roomCode;
       playerId = data.playerId;
       playerRole = data.role;
-      gameState = { ...gameState, ...data.data };
+      gameState = { ...gameState, ...data.data }; // Switch UI ke Game Mode
 
-      // Switch UI ke Game Mode
       document.getElementById("createMatchModal").classList.add("hidden");
       document.getElementById("joinMatchModal").classList.add("hidden");
       document.getElementById("dashboardScreen").classList.add("hidden");
@@ -237,9 +344,8 @@ function handleServerMessage(data) {
       else gameState.defender = { id: data.playerId, name: data.playerName };
       addMessage(`${data.playerName} joined.`, "system");
       updateGameUI();
-      break;
+      break; // --- GAMEPLAY ACTIONS ---
 
-    // --- GAMEPLAY ACTIONS ---
     case "troopDeployed":
       if (data.playerId !== playerId) {
         gameState.troops.push(data.troop);
@@ -292,26 +398,44 @@ function setupPlayerRoleUI(role) {
 }
 
 function updateGameUI() {
-  if (document.getElementById("gameContainer").classList.contains("hidden"))
+  const gameContainer = document.getElementById("gameContainer");
+  if (!gameContainer || gameContainer.classList.contains("hidden")) {
     return;
+  }
 
-  document.getElementById("attackerGold").textContent = gameState.attackerGold;
-  document.getElementById("defenderGold").textContent = gameState.defenderGold;
-  document.getElementById("defenderHP").textContent = gameState.baseHP;
-  document.getElementById("attackerName").textContent = gameState.attacker
+  const attackerGoldEl = document.getElementById("attackerGold");
+  const defenderGoldEl = document.getElementById("defenderGold");
+  const defenderHPEl = document.getElementById("defenderHP");
+  const attackerNameEl = document.getElementById("attackerName");
+  const defenderNameEl = document.getElementById("defenderName");
+  const countdownEl = document.getElementById("countdown");
+
+  if (
+    !attackerGoldEl ||
+    !defenderGoldEl ||
+    !defenderHPEl ||
+    !attackerNameEl ||
+    !defenderNameEl
+  ) {
+    return;
+  }
+
+  attackerGoldEl.textContent = gameState.attackerGold;
+  defenderGoldEl.textContent = gameState.defenderGold;
+  defenderHPEl.textContent = gameState.baseHP;
+
+  attackerNameEl.textContent = gameState.attacker
     ? gameState.attacker.name
     : "Waiting...";
-  document.getElementById("defenderName").textContent = gameState.defender
+  defenderNameEl.textContent = gameState.defender
     ? gameState.defender.name
     : "Waiting...";
 
-  if (gameState.gameStatus === "playing") {
+  if (gameState.gameStatus === "playing" && countdownEl) {
     const elapsed = Math.floor((Date.now() - gameState.gameStartTime) / 1000);
     const mins = Math.floor(elapsed / 60);
     const secs = elapsed % 60;
-    document.getElementById("countdown").textContent = `${mins}:${secs
-      .toString()
-      .padStart(2, "0")}`;
+    countdownEl.textContent = `${mins}:${secs.toString().padStart(2, "0")}`;
   }
 }
 
@@ -335,15 +459,15 @@ function showGameOverModal(winner, reason) {
   document.getElementById("winnerEmoji").textContent = isWin ? "🏆" : "💀";
 
   document.getElementById("gameResult").innerHTML = `
-        <p>Winner: <span class="font-bold text-yellow-400">${winner}</span></p>
-        <p>Reason: ${reason}</p>
-        <p>Final Base HP: ${gameState.baseHP}</p>
-        ${
-          isWin
-            ? '<p class="text-green-400 mt-2 font-bold">+10 Trophies!</p>'
-            : '<p class="text-red-400 mt-2 font-bold">+0 Trophies</p>'
-        }
-    `;
+        <p>Winner: <span class="font-bold text-yellow-400">${winner}</span></p>
+        <p>Reason: ${reason}</p>
+        <p>Final Base HP: ${gameState.baseHP}</p>
+        ${
+    isWin
+      ? '<p class="text-green-400 mt-2 font-bold">+10 Trophies!</p>'
+      : '<p class="text-red-400 mt-2 font-bold">+0 Trophies</p>'
+  }
+    `;
 }
 
 // -------------------------------------------------------
@@ -356,6 +480,7 @@ function showCreateMatch() {
 
 function showJoinMatch() {
   document.getElementById("joinMatchModal").classList.remove("hidden");
+  requestAvailableMatches();
 }
 
 function backToDashboard() {
@@ -386,10 +511,18 @@ function joinMatch() {
   sendToServer({ type: "joinRoom", roomCode: code });
 }
 
+function quickJoinMatch(code) {
+  sendToServer({ type: "joinRoom", roomCode: code });
+}
+
+function rejoinMatch(code) {
+  sendToServer({ type: "rejoinRoom", roomCode: code });
+}
+
 function cancelWaiting() {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    // Close sementara trigger disconnect di server, lalu reconnect
     ws.close();
+
     location.reload();
   } else {
     returnToMenu();
@@ -411,23 +544,36 @@ function returnToMenu() {
     gameStartTime: 0,
   };
 
-  // UI Switch
+  roomCode = null;
+  playerId = null;
+  playerRole = null; // UI Switch
+
   document.getElementById("gameContainer").classList.add("hidden");
   document.getElementById("gameOverModal").classList.add("hidden");
-  document.getElementById("waitingModal").classList.add("hidden");
+  document.getElementById("waitingModal").classList.add("hidden"); // Show Dashboard
 
-  // Show Dashboard
   document.getElementById("dashboardScreen").classList.remove("hidden");
-  document.getElementById("dashboardScreen").classList.add("flex");
+  document.getElementById("dashboardScreen").classList.add("flex"); // Refresh Stats & Leaderboard
 
-  // Refresh Stats & Leaderboard
   requestDashboard();
 }
 
 function confirmExit() {
-  if (confirm("Exit game? You will return to dashboard.")) {
+  if (
+    confirm(
+      "Exit game? You will return to dashboard. This might count as a loss if the game has started."
+    )
+  ) {
+    // Close sementara trigger disconnect di server, lalu biarkan auto-reconnect
     ws.close();
     location.reload();
+  }
+}
+
+function logout() {
+  if (confirm("Are you sure you want to logout?")) {
+    clearSession(); // Hapus sesi dari localStorage
+    window.location.reload();
   }
 }
 
@@ -566,17 +712,15 @@ function sendChat() {
   const input = document.getElementById("chatInput");
   const message = input.value.trim();
   if (message) {
-    sendToServer({ type: "chat", message: message });
-    // Client side chat echo removed here because server broadcasts it back
+    sendToServer({ type: "chat", message: message }); // Client side chat echo removed here because server broadcasts it back
     input.value = "";
   }
 }
 
 // Canvas Click Handler
 canvas.addEventListener("click", (e) => {
-  if (!selectedUnit || gameState.gameStatus !== "playing") return;
+  if (!selectedUnit || gameState.gameStatus !== "playing") return; // Scaling correction for responsive canvas
 
-  // Scaling correction for responsive canvas
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
   const scaleY = canvas.height / rect.height;
@@ -592,9 +736,8 @@ function deployTroop(x, y) {
   if (gameState.attackerGold < troopType.cost) {
     addMessage("Not enough gold!", "error");
     return;
-  }
+  } // Lane Detection
 
-  // Lane Detection
   let lane = -1;
   if (y > 100 && y < 200) lane = 0;
   else if (y > 300 && y < 400) lane = 1;
@@ -708,15 +851,13 @@ function gameLoop() {
   }
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  drawGameMap();
+  drawGameMap(); // LOGIC TROOPS
 
-  // LOGIC TROOPS
   for (let i = gameState.troops.length - 1; i >= 0; i--) {
     const troop = gameState.troops[i];
     const type = TROOP_TYPES[troop.type];
-    const path = PATHS[troop.lane];
+    const path = PATHS[troop.lane]; // Move
 
-    // Move
     if (troop.pathIndex < path.length - 1) {
       const curr = path[troop.pathIndex];
       const next = path[troop.pathIndex + 1];
@@ -727,8 +868,7 @@ function gameLoop() {
       if (segDist > 0 && troop.progress >= segDist) {
         troop.progress -= segDist;
         troop.pathIndex++;
-      }
-      // Interpolate
+      } // Interpolate
       const pStart = path[troop.pathIndex];
       const pEnd = path[troop.pathIndex + 1] || BASE_POS;
       const dist =
@@ -759,9 +899,8 @@ function gameLoop() {
       }
     }
     drawTroop(troop, type);
-  }
+  } // LOGIC TOWERS & PROJECTILES
 
-  // LOGIC TOWERS & PROJECTILES
   const now = Date.now();
   gameState.towers.forEach((tower) => {
     const type = TOWER_TYPES[tower.type];
@@ -786,9 +925,8 @@ function gameLoop() {
         });
       }
     }
-  });
+  }); // LOGIC PROJECTILES
 
-  // LOGIC PROJECTILES
   for (let i = gameState.projectiles.length - 1; i >= 0; i--) {
     const proj = gameState.projectiles[i];
     const target = gameState.troops.find((t) => t.id === proj.targetId);
@@ -822,9 +960,8 @@ function gameLoop() {
       ctx.arc(proj.x, proj.y, 5, 0, Math.PI * 2);
       ctx.fill();
     }
-  }
+  } // Cleanup Dead Troops
 
-  // Cleanup Dead Troops
   for (let i = gameState.troops.length - 1; i >= 0; i--) {
     if (gameState.troops[i].health <= 0) {
       gameState.troops.splice(i, 1);
@@ -875,9 +1012,8 @@ function drawGameMap() {
   ctx.font = "20px Arial";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText("🏰", BASE_POS.x, BASE_POS.y);
+  ctx.fillText("🏰", BASE_POS.x, BASE_POS.y); // HP BAR
 
-  // HP BAR
   ctx.fillStyle = "#000";
   ctx.fillRect(BASE_POS.x - 40, BASE_POS.y - 50, 80, 8);
   const hpPct = Math.max(0, gameState.baseHP / 100);
@@ -892,8 +1028,7 @@ function drawTroop(t, type) {
   ctx.fill();
   ctx.fillStyle = "#fff";
   ctx.font = `${type.size + 4}px Arial`;
-  ctx.fillText(type.emoji, t.x, t.y);
-  // HP
+  ctx.fillText(type.emoji, t.x, t.y); // HP
   if (t.health < t.maxHealth) {
     ctx.fillStyle = "#000";
     ctx.fillRect(t.x - 15, t.y - type.size - 10, 30, 4);
@@ -917,14 +1052,6 @@ function drawTower(t, type) {
   ctx.fillText(type.emoji, t.x, t.y);
 }
 
-function logout() {
-  if (confirm("Are you sure you want to logout?")) {
-    // Refresh halaman adalah cara 'Hard Logout' terbaik untuk Game WebSocket
-    // Ini akan memutus koneksi WS, menghapus memori lokal, dan kembali ke Login
-    window.location.reload();
-  }
-}
-
 // WINDOW EXPORTS
 window.toggleAuth = toggleAuth;
 window.submitAuth = submitAuth;
@@ -935,6 +1062,7 @@ window.showCreateMatch = showCreateMatch;
 window.showJoinMatch = showJoinMatch;
 window.createMatch = createMatch;
 window.joinMatch = joinMatch;
+window.quickJoinMatch = quickJoinMatch;
 window.backToDashboard = backToDashboard;
 window.selectCreateRole = selectCreateRole;
 window.cancelWaiting = cancelWaiting;
@@ -943,5 +1071,5 @@ window.confirmExit = confirmExit;
 window.logout = logout;
 
 // STARTUP
-connectWebSocket();
+checkSessionAndStart(); // Panggil fungsi ini untuk cek sesi dan memulai
 setInterval(gameLoop, 1000 / 60);
