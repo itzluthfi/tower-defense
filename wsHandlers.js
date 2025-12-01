@@ -2,15 +2,14 @@
 const bcrypt = require("bcryptjs");
 const WebSocket = require("ws");
 
-// Global state
 const rooms = new Map();
 const clients = new Map();
 const disconnectTimers = new Map();
 const DISCONNECT_GRACE_PERIOD_MS = 60000;
+const GAME_DURATION_MS = 60000;
 
 let dbPool; 
 
-// --- HELPER FUNCTIONS ---
 function createInitialGameState() {
   return {
     attacker: null,
@@ -54,7 +53,6 @@ function sendToClient(client, data) {
   }
 }
 
-// --- GAME OVER & DISCONNECT LOGIC ---
 
 async function processGameOver(roomCode, winnerRole, reason, finalBaseHp, wss) {
     const gameState = rooms.get(roomCode);
@@ -89,19 +87,17 @@ async function processGameOver(roomCode, winnerRole, reason, finalBaseHp, wss) {
         if (attackerId && defenderId && winnerId && loserId) {
             const isAttackerWin = winnerRole === "Attacker";
 
-            // Update Attacker Stats
+            await broadcastLeaderboardUpdate(wss);
             await dbPool.execute(
                 "UPDATE users SET matches_played = matches_played + 1, wins = wins + ?, losses = losses + ?, trophies = trophies + ? WHERE id = ?",
                 [isAttackerWin ? 1 : 0, isAttackerWin ? 0 : 1, isAttackerWin ? 10 : 0, attackerId]
             );
 
-            // Update Defender Stats
             await dbPool.execute(
                 "UPDATE users SET matches_played = matches_played + 1, wins = wins + ?, losses = losses + ?, trophies = trophies + ? WHERE id = ?",
                 [isAttackerWin ? 0 : 1, isAttackerWin ? 1 : 0, isAttackerWin ? 0 : 10, defenderId]
             );
 
-            // Update Match Record
             await dbPool.execute(
                 `UPDATE matches
                 SET winner_id = ?, loser_id = ?, reason = ?, base_hp_final = ?, duration_sec = ?, status = 'finished'
@@ -110,6 +106,7 @@ async function processGameOver(roomCode, winnerRole, reason, finalBaseHp, wss) {
             );
 
             console.log(`✅ Match ${roomCode} logged and database updated. Winner: ${winnerRole}`);
+            await broadcastLeaderboardUpdate(wss);
         } else {
             console.log(`⚠️ Database skipped for Room ${roomCode}. Missing player ID.`);
         }
@@ -144,7 +141,6 @@ async function startGracePeriodTimer(roomCode, disconnectedRole, wss) {
     disconnectTimers.set(roomCode, timer);
 }
 
-// --- PRIMARY HANDLERS (Sama seperti sebelumnya, tetapi menggunakan dbPool) ---
 
 async function handleRegister(ws, data) {
     const { username, password } = data;
@@ -175,7 +171,6 @@ async function handleLogin(ws, data) {
         clients.set(ws, { id: user.id, username: user.username, authenticated: true, roomCode: null, role: null });
         sendToClient(ws, { type: "loginSuccess", username: user.username, id: user.id });
 
-        // Lanjut ke dashboard fetch
         await handleGetDashboard(ws);
     } catch (err) {
         console.error("Login Error:", err);
@@ -329,6 +324,8 @@ async function handleJoinRoom(ws, data, wss) {
     sendToClient(ws, { type: "roomJoined", roomCode: clientInfo.roomCode, playerId: clientInfo.id, role: role, data: gameState });
     broadcastToRoom(clientInfo.roomCode, { type: "playerJoined", playerId: clientInfo.id, playerName: clientInfo.username, role: role, }, wss, ws);
 
+    startGameTimer(clientInfo.roomCode, wss);
+
     if (gameState.attacker && gameState.defender && gameState.gameStatus === "waiting") {
         gameState.gameStatus = "playing";
         gameState.gameStartTime = Date.now();
@@ -356,7 +353,6 @@ async function handleLeaveMatch(ws, wss) {
         const winnerRole = role === "attacker" ? "Defender" : "Attacker";
         console.log(`[${roomCode}] Player ${username} explicitly left. Forcing game over.`);
         
-        // Memaksa game over dan mencatat kekalahan di DB
         await processGameOver(roomCode, winnerRole, "Player Forfeited", gameState.baseHP, wss);
     } 
     
@@ -443,6 +439,47 @@ async function handlePlayerDisconnect(ws, wss) {
     }
 }
 
+async function broadcastLeaderboardUpdate(wss) {
+  try {
+    const [leaderboard] = await dbPool.execute(
+      "SELECT username, trophies FROM users ORDER BY trophies DESC LIMIT 10"
+    );
+
+    const message = JSON.stringify({
+      type: "leaderboardUpdate",
+      leaderboard: leaderboard,
+    });
+
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(message);
+      }
+    });
+
+    console.log("📊 Real-time Leaderboard broadcasted.");
+  } catch (err) {
+    console.error("Error broadcasting leaderboard:", err);
+  }
+}
+
+function startGameTimer(roomCode, wss) {
+    setTimeout(async () => {
+        const gameState = rooms.get(roomCode);
+        
+        if (gameState && gameState.gameStatus === "playing") {
+            console.log(`⏰ Time limit reached for room ${roomCode}. Defender wins!`);
+            
+            await processGameOver(
+                roomCode, 
+                "Defender",       
+                "Time Limit Reached", 
+                gameState.baseHP, 
+                wss
+            );
+        }
+    }, GAME_DURATION_MS);
+}
+
 module.exports = (wssInstance, poolInstance) => {
     dbPool = poolInstance;
 
@@ -462,7 +499,6 @@ module.exports = (wssInstance, poolInstance) => {
                     return sendToClient(ws, { type: "error", message: "Authentication required." });
                 }
                 
-                // Handlers yang membutuhkan otentikasi
                 switch (data.type) {
                     case "getDashboard": return handleGetDashboard(ws);
                     case "getAvailableMatches": return handleGetAvailableMatches(ws);
@@ -473,7 +509,6 @@ module.exports = (wssInstance, poolInstance) => {
                     case "leaveMatch": return handleLeaveMatch(ws, wssInstance);
 
                     case "updateGold":
-                        // Logic update gold bisa tetap di server.js (atau di sini)
                         if (!clientInfo || !clientInfo.roomCode) return;
                         const gameState = rooms.get(clientInfo.roomCode);
                         if (!gameState) return;

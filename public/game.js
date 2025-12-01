@@ -1,13 +1,9 @@
-// game.js - FINAL VERSION WITH AUTO REFRESH ROOMS
 
-// --- SAFETY CHECK ---
-// Jika server lupa mengirim config, kita pakai default localhost
 if (typeof CONFIG === "undefined") {
   console.warn("⚠️ Config gagal dimuat. Fallback ke localhost.");
   var CONFIG = { };
 }
 
-// --- GLOBAL VARIABLES ---
 let gameState = {
   attacker: null,
   defender: null,
@@ -21,35 +17,29 @@ let gameState = {
   gameStartTime: 0,
 };
 
-// User & Connection State
 let currentUser = null;
 let ws = null;
 let reconnectInterval = null;
+const GAME_DURATION_SEC = 60;
 
-// Game Room Variables
 let playerId = null;
-let matchesInterval = null; // <--- INI SEKARANG AKTIF
+let matchesInterval = null; 
 let playerRole = null;
 let roomCode = null;
 let selectedUnit = null;
-let selectedUnitRange = 0; // Variabel range visual
+let selectedUnitRange = 0; 
 
 let goldInterval = null;
 
 let mouseX = 0;
 let mouseY = 0;
 
-// Canvas Setup
 const canvas = document.getElementById("gameCanvas");
 const ctx = canvas.getContext("2d");
 
-// -------------------------------------------------------
-// --- 1. AUTHENTICATION & DASHBOARD LOGIC ---
-// -------------------------------------------------------
 
 let authMode = "login";
 
-// --- SESSION MANAGEMENT ---
 function saveSession(user) {
   localStorage.setItem("td_session_id", user.id);
   localStorage.setItem("td_session_username", user.username);
@@ -124,6 +114,46 @@ function requestDashboard() {
 
 function requestAvailableMatches() {
   sendToServer({ type: "getAvailableMatches" });
+}
+
+function updateLeaderboardOnly(leaderboard) {
+  const tbody = document.getElementById("leaderboardBody");
+  if (!tbody) return;
+
+  tbody.innerHTML = ""; 
+
+  if (!leaderboard || leaderboard.length === 0) {
+    tbody.innerHTML =
+      '<tr><td colspan="3" class="p-4 text-center text-gray-500">No players yet.</td></tr>';
+  } else {
+    leaderboard.forEach((player, index) => {
+      const row = document.createElement("tr");
+      row.className = "hover:bg-white/5 transition border-b border-white/5";
+
+      let rankDisplay = index + 1;
+      let rankColor = "text-gray-400";
+
+      if (index === 0) {
+        rankDisplay = "🥇";
+        rankColor = "text-yellow-400";
+      }
+      if (index === 1) {
+        rankDisplay = "🥈";
+        rankColor = "text-gray-300";
+      }
+      if (index === 2) {
+        rankDisplay = "🥉";
+        rankColor = "text-orange-400";
+      }
+
+      row.innerHTML = `
+        <td class="p-3 font-bold ${rankColor}">${rankDisplay}</td>
+        <td class="p-3 font-semibold text-white">${player.username}</td>
+        <td class="p-3 text-right font-bold text-yellow-400">${player.trophies} 🏆</td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
 }
 
 function updateDashboardUI(stats, leaderboard) {
@@ -204,7 +234,7 @@ function getTimeAgo(date) {
 }
 
 // -------------------------------------------------------
-// --- 2. WEBSOCKET CONNECTION & HANDLERS ---
+// ---  WEBSOCKET CONNECTION & HANDLERS ---
 // -------------------------------------------------------
 
 function connectWebSocket(callback) {
@@ -233,10 +263,15 @@ function connectWebSocket(callback) {
 
   ws.onclose = () => {
     console.log("WS Disconnected");
+    updateConnectionStatus(false);
     if (!reconnectInterval) {
       reconnectInterval = setInterval(() => {
         console.log("Reconnecting...");
-        connectWebSocket();
+        connectWebSocket(() => {
+          // Callback: Jika berhasil connect lagi, coba reauth
+          const storedId = localStorage.getItem("td_session_id");
+          if (storedId) sendToServer({ type: "reauth", id: storedId });
+        });
       }, 3000);
     }
   };
@@ -279,17 +314,17 @@ function handleServerMessage(data) {
       }
       break;
 
-    // --- BAGIAN INI SUDAH DIPERBAIKI (AUTO REFRESH) ---
+    case "leaderboardUpdate":
+      updateLeaderboardOnly(data.leaderboard);
+      break;
+
     case "dashboardData":
       updateDashboardUI(data.stats, data.leaderboard);
       requestAvailableMatches(); // Request pertama kali
 
-      // Hapus interval lama agar tidak double
       if (matchesInterval) clearInterval(matchesInterval);
 
-      // Set interval baru: Refresh setiap 3 detik
       matchesInterval = setInterval(() => {
-        // Hanya refresh jika dashboard terlihat
         if (
           !document
             .getElementById("dashboardScreen")
@@ -306,7 +341,6 @@ function handleServerMessage(data) {
 
     case "roomCreated":
     case "roomJoined":
-      // Matikan auto-refresh karena sudah masuk game
       if (matchesInterval) clearInterval(matchesInterval);
 
       roomCode = data.roomCode;
@@ -380,7 +414,7 @@ function handleServerMessage(data) {
 }
 
 // -------------------------------------------------------
-// --- 3. UI HELPER FUNCTIONS ---
+// ---  UI HELPER FUNCTIONS ---
 // -------------------------------------------------------
 
 function setupPlayerRoleUI(role) {
@@ -426,9 +460,25 @@ function updateGameUI() {
     : "Waiting...";
 
   if (gameState.gameStatus === "playing" && countdownEl) {
-    const elapsed = Math.floor((Date.now() - gameState.gameStartTime) / 1000);
-    const mins = Math.floor(elapsed / 60);
-    const secs = elapsed % 60;
+    const elapsedSec = Math.floor(
+      (Date.now() - gameState.gameStartTime) / 1000
+    );
+
+    let remainingSec = GAME_DURATION_SEC - elapsedSec;
+
+    if (remainingSec < 0) remainingSec = 0;
+
+    const mins = Math.floor(remainingSec / 60);
+    const secs = remainingSec % 60;
+
+    if (remainingSec <= 10) {
+      countdownEl.parentElement.className =
+        "bg-red-500 text-white px-4 py-2 rounded-lg flex items-center gap-2 border border-red-700 animate-pulse";
+    } else {
+      countdownEl.parentElement.className =
+        "bg-gray-800 px-4 py-2 rounded-lg flex items-center gap-2 border border-gray-700";
+    }
+
     countdownEl.textContent = `${mins}:${secs.toString().padStart(2, "0")}`;
   }
 }
@@ -463,7 +513,7 @@ function showGameOverModal(winner, reason) {
 }
 
 // -------------------------------------------------------
-// --- 4. MENU & BUTTON ACTIONS ---
+// ---  MENU & BUTTON ACTIONS ---
 // -------------------------------------------------------
 
 function showCreateMatch() {
@@ -516,6 +566,14 @@ function cancelWaiting() {
 }
 
 function returnToMenu() {
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    sendToServer({ type: "leaveMatch" });
+  } else {
+    console.log("Connection lost, reconnecting for dashboard...");
+    connectWebSocket(requestDashboard);
+  }
+
   gameState = {
     attacker: null,
     defender: null,
@@ -528,13 +586,20 @@ function returnToMenu() {
     gameStatus: "waiting",
     gameStartTime: 0,
   };
+
+  if (matchesInterval) {
+    clearInterval(matchesInterval);
+    matchesInterval = null;
+  }
+  stopGoldGeneration();
+
   roomCode = null;
   playerId = null;
   playerRole = null;
-  if (reconnectInterval) {
-    clearInterval(reconnectInterval);
-    reconnectInterval = null;
-  }
+  // if (reconnectInterval) {
+  //   clearInterval(reconnectInterval);
+  //   reconnectInterval = null;
+  // }
 
   document.getElementById("gameContainer").classList.add("hidden");
   document.getElementById("gameOverModal").classList.add("hidden");
@@ -544,7 +609,19 @@ function returnToMenu() {
   document.getElementById("dashboardScreen").classList.add("flex");
 
   // Refresh data dan nyalakan lagi interval
-  requestDashboard();
+  setTimeout(() => {
+    requestDashboard();
+    requestAvailableMatches();
+
+    // Nyalakan lagi interval refresh room
+    matchesInterval = setInterval(() => {
+      if (
+        !document.getElementById("dashboardScreen").classList.contains("hidden")
+      ) {
+        requestAvailableMatches();
+      }
+    }, 3000);
+  }, 200);
 }
 
 function confirmExit() {
@@ -556,9 +633,7 @@ function confirmExit() {
       ws.readyState === WebSocket.OPEN
     )
       sendToServer({ type: "leaveMatch" });
-    if (ws && ws.readyState === WebSocket.OPEN)
-      ws.close(1000, "User requested exit");
-    setTimeout(returnToMenu, 500);
+    window.location.reload();
   }
 }
 
@@ -570,7 +645,7 @@ function logout() {
 }
 
 // -------------------------------------------------------
-// --- 5. GAME LOGIC & CANVAS ---
+// ---  GAME LOGIC & CANVAS ---
 // -------------------------------------------------------
 
 // CONSTANTS
@@ -1072,11 +1147,10 @@ function drawTower(t, type) {
   ctx.fillText(type.emoji, t.x - 8, t.y + 5);
 }
 
-// WINDOW EXPORTS
 window.toggleAuth = toggleAuth;
 window.submitAuth = submitAuth;
 window.requestDashboard = requestDashboard;
-window.requestAvailableMatches = requestAvailableMatches; // Tambahkan ini agar tombol refresh jalan
+window.requestAvailableMatches = requestAvailableMatches; 
 window.selectUnit = selectUnit;
 window.sendChat = sendChat;
 window.showCreateMatch = showCreateMatch;
@@ -1091,6 +1165,5 @@ window.returnToMenu = returnToMenu;
 window.confirmExit = confirmExit;
 window.logout = logout;
 
-// STARTUP
 checkSessionAndStart();
 setInterval(gameLoop, 1000 / 60);
