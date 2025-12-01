@@ -1,5 +1,3 @@
-// server.js - FINAL VERSION WITH MYSQL & MATCH LIST FEATURE
-
 require("dotenv").config();
 const WebSocket = require("ws");
 const http = require("http");
@@ -12,7 +10,6 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// --- KONFIGURASI DATABASE ---
 const DB_CONFIG = {
   host: process.env.DB_HOST || "localhost",
   user: process.env.DB_USER || "root",
@@ -25,7 +22,6 @@ const DB_CONFIG = {
 
 let pool;
 
-// --- FUNGSI UTILITY DATABASE ---
 async function initializeDatabase() {
   console.log("🛠️ Checking database schema...");
 
@@ -45,35 +41,35 @@ async function initializeDatabase() {
     pool = mysql.createPool(DB_CONFIG);
 
     const createUsersTableSQL = `
-            CREATE TABLE IF NOT EXISTS users (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                username VARCHAR(255) UNIQUE NOT NULL,
-                password VARCHAR(255) NOT NULL,
-                wins INT DEFAULT 0,
-                losses INT DEFAULT 0,
-                matches_played INT DEFAULT 0,
-                trophies INT DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB;
-        `;
+    CREATE TABLE IF NOT EXISTS users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(255) UNIQUE NOT NULL,
+        password VARCHAR(255) NOT NULL,
+        wins INT DEFAULT 0,
+        losses INT DEFAULT 0,
+        matches_played INT DEFAULT 0,
+        trophies INT DEFAULT 0,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB;
+    `;
 
     const createMatchesTableSQL = `
-            CREATE TABLE IF NOT EXISTS matches (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                room_code VARCHAR(10) NOT NULL,
-                attacker_id INT,
-                defender_id INT,
-                winner_id INT,
-                loser_id INT,
-                reason VARCHAR(255),
-                base_hp_final INT DEFAULT 0,
-                duration_sec INT,
-                status VARCHAR(20) DEFAULT 'waiting',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (attacker_id) REFERENCES users(id),
-                FOREIGN KEY (defender_id) REFERENCES users(id)
-            ) ENGINE=InnoDB;
-        `;
+    CREATE TABLE IF NOT EXISTS matches (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        room_code VARCHAR(10) NOT NULL,
+        attacker_id INT,
+        defender_id INT,
+        winner_id INT,
+        loser_id INT,
+        reason VARCHAR(255),
+        base_hp_final INT DEFAULT 0,
+        duration_sec INT,
+        status VARCHAR(20) DEFAULT 'waiting',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (attacker_id) REFERENCES users(id),
+        FOREIGN KEY (defender_id) REFERENCES users(id)
+    ) ENGINE=InnoDB;
+    `;
 
     const conn = await pool.getConnection();
     try {
@@ -188,6 +184,27 @@ wss.on("connection", (ws) => {
         case "getAvailableMatches":
           await handleGetAvailableMatches(ws);
           break;
+        case "updateGold":
+          if (!clientInfo || !clientInfo.roomCode) return;
+          const gameState = rooms.get(clientInfo.roomCode);
+          if (!gameState) return;
+
+          if (data.role === "attacker") {
+            gameState.attackerGold = data.gold;
+          } else if (data.role === "defender") {
+            gameState.defenderGold = data.gold;
+          }
+
+          broadcastToRoom(
+            clientInfo.roomCode,
+            {
+              type: "updateGold",
+              role: data.role,
+              gold: data.gold,
+            },
+            ws
+          );
+          break;
         case "createRoom":
           await handleCreateRoom(ws, data);
           break;
@@ -206,6 +223,9 @@ wss.on("connection", (ws) => {
         case "chat":
           handleChat(ws, data);
           break;
+        case "leaveMatch":
+        await handleLeaveMatch(ws);
+        break;
         default:
           console.log("Unknown message type:", data.type);
       }
@@ -311,11 +331,14 @@ async function handleLogin(ws, data) {
   }
 }
 
+// server.js (Dalam bagian WEBSOCKET HANDLERS)
+
 async function handleReauth(ws, data) {
   const { id } = data;
   if (!id) return;
 
   try {
+    // 1. Ambil data pengguna dari database
     const [userRows] = await pool.execute(
       "SELECT id, username FROM users WHERE id = ?",
       [id]
@@ -331,51 +354,79 @@ async function handleReauth(ws, data) {
 
     const user = userRows[0];
 
-    // Cek apakah user sedang bermain atau menunggu di match
+    // 2. Cek apakah ada pertandingan aktif di database
     const [matchRows] = await pool.execute(
-      `SELECT room_code, status, attacker_id, defender_id 
-         FROM matches 
-         WHERE (attacker_id = ? OR defender_id = ?) 
-         AND status IN ('waiting', 'playing') 
-         ORDER BY created_at DESC LIMIT 1`,
+      `SELECT room_code, attacker_id, defender_id 
+             FROM matches 
+             WHERE (attacker_id = ? OR defender_id = ?) 
+             AND status IN ('waiting', 'playing') 
+             ORDER BY created_at DESC LIMIT 1`,
       [id, id]
     );
 
     let roomCode = null;
     let role = null;
+    let gameState = null;
 
     if (matchRows.length > 0) {
       const match = matchRows[0];
       roomCode = match.room_code;
       role = match.attacker_id == id ? "attacker" : "defender";
-
-      // Cek jika room masih ada di in-memory state
-      if (!rooms.has(roomCode) && match.status === "playing") {
-        console.warn(
-          `Room ${roomCode} missing from memory, forcing game over.`
-        );
-        // Jika room hilang dari memory tapi DB bilang 'playing', anggap kalah
-        // Atau, opsional: Coba rebuild game state, tapi ini kompleks.
-        // Saat ini, kita biarkan saja klien melanjutkan dan panggil handlePlayerDisconnect
-        // jika mereka mencoba aksi yang memerlukan state memory.
-        roomCode = null;
-        role = null;
-      }
+      gameState = rooms.get(roomCode);
     }
 
+    // 3. Update status klien di server
     clients.set(ws, {
       id: user.id,
       username: user.username,
       authenticated: true,
-      roomCode: roomCode, // Simpan roomCode di sesi server
+      roomCode: roomCode,
       role: role,
     });
 
-    sendToClient(ws, {
-      type: "reauthSuccess",
-      roomCode: roomCode, // Kirim roomCode & role untuk rejoin
-      role: role,
-    });
+    // 4. Proses Rejoin (Jika Room Ditemukan di Memory)
+    if (roomCode && gameState) {
+      // a. Batalkan Grace Period Timer
+      if (disconnectTimers.has(roomCode)) {
+        clearTimeout(disconnectTimers.get(roomCode));
+        disconnectTimers.delete(roomCode);
+        console.log(
+          `[${roomCode}] Grace period cancelled for ${user.username}.`
+        );
+      }
+
+      // b. Tandai pemain sebagai terhubung kembali
+      const playerState =
+        role === "attacker" ? gameState.attacker : gameState.defender;
+      if (playerState) playerState.disconnected = false; // Tandai sudah terhubung
+
+      // c. Kirim state room terbaru ke klien yang rejoin
+      sendToClient(ws, {
+        type: "roomJoined", // Menggunakan roomJoined untuk memicu transisi UI
+        roomCode: roomCode,
+        playerId: user.id,
+        role: role,
+        data: gameState, // Kirim state game lengkap
+      });
+
+      // d. Beri tahu lawan bahwa pemain telah kembali
+      broadcastToRoom(
+        roomCode,
+        {
+          type: "chat",
+          playerName: user.username,
+          message: `${user.username} reconnected.`,
+        },
+        ws
+      );
+    } else {
+      // 5. Jika tidak ada room aktif di memory (atau memang tidak ada match)
+      sendToClient(ws, {
+        type: "reauthSuccess",
+        roomCode: roomCode,
+        role: role,
+      });
+    }
   } catch (err) {
     console.error("Reauth Error:", err);
     sendToClient(ws, {
@@ -412,19 +463,27 @@ async function handleGetDashboard(ws) {
 
 async function handleGetAvailableMatches(ws) {
   try {
-    const [matches] =
-      await pool.execute(`SELECT m.room_code, m.created_at, COALESCE(ua.username, ud.username) as creator_name,
-              CASE 
-                WHEN m.attacker_id IS NOT NULL AND m.defender_id IS NULL THEN 'defender'
-                WHEN m.defender_id IS NOT NULL AND m.attacker_id IS NULL THEN 'attacker'
-                ELSE 'unknown'
-              END as needed_role
-       FROM matches m
-       LEFT JOIN users ua ON m.attacker_id = ua.id
-       LEFT JOIN users ud ON m.defender_id = ud.id
-       WHERE m.status = 'waiting' AND (m.attacker_id IS NOT NULL OR m.defender_id IS NOT NULL)
-       ORDER BY m.created_at DESC
-       LIMIT 20`);
+    const query = `
+    SELECT 
+      m.room_code, 
+      m.created_at, 
+      COALESCE(ua.username, ud.username) AS creator_name,
+      CASE
+        WHEN m.attacker_id IS NOT NULL AND m.defender_id IS NULL THEN 'defender'
+        WHEN m.defender_id IS NOT NULL AND m.attacker_id IS NULL THEN 'attacker'
+        ELSE 'unknown'
+      END AS needed_role
+    FROM matches m
+    LEFT JOIN users ua ON m.attacker_id = ua.id
+    LEFT JOIN users ud ON m.defender_id = ud.id
+    WHERE 
+      m.status = 'waiting' 
+      AND (m.attacker_id IS NOT NULL OR m.defender_id IS NOT NULL)
+    ORDER BY m.created_at DESC
+    LIMIT 20;
+        `;
+
+    const [matches] = await pool.execute(query);
 
     sendToClient(ws, {
       type: "availableMatches",
@@ -452,11 +511,11 @@ async function handleRejoinRoom(ws, data) {
 
   const gameState = rooms.get(roomCode);
   if (!gameState) {
-    // Room hilang dari memory. Ini adalah kondisi kritis.
-    // Hapus status 'playing' dari DB dan suruh klien kembali ke dashboard.
     await pool.execute(
-      `UPDATE matches SET status = 'finished', reason = 'Memory state lost' 
-             WHERE room_code = ? AND status = 'playing'`,
+      `UPDATE matches
+     SET status = 'finished',
+         reason = 'Memory state lost'
+     WHERE room_code = ? AND status = 'playing'`,
       [roomCode]
     );
     clientInfo.roomCode = null;
@@ -467,16 +526,14 @@ async function handleRejoinRoom(ws, data) {
     });
   }
 
-  // Success: Kirim full game state agar klien dapat melanjutkan
   sendToClient(ws, {
-    type: "roomJoined", // Gunakan event yang sama agar klien memproses state
+    type: "roomJoined",
     roomCode: roomCode,
     playerId: clientInfo.id,
     role: clientInfo.role,
     data: gameState,
   });
 
-  // Beritahu pemain lain bahwa pemain ini kembali online
   broadcastToRoom(roomCode, {
     type: "chat",
     playerName: clientInfo.username,
@@ -609,6 +666,33 @@ async function handleJoinRoom(ws, data) {
   }
 }
 
+async function handleLeaveMatch(ws) {
+    const clientInfo = clients.get(ws);
+    if (!clientInfo || !clientInfo.roomCode) {
+        // Jika klien tidak ada di room, biarkan saja
+        sendToClient(ws, { type: "chat", message: "Successfully returned to dashboard." });
+        return;
+    }
+
+    const { roomCode, role, id: userId, username } = clientInfo;
+    const gameState = rooms.get(roomCode);
+
+    if (gameState && gameState.gameStatus === "playing") {
+        const winnerRole = role === "attacker" ? "Defender" : "Attacker";
+        console.log(`[${roomCode}] Player ${username} explicitly left. Forcing game over.`);
+        
+        // Memaksa game over dan mencatat kekalahan di DB
+        await processGameOver(roomCode, winnerRole, "Player Forfeited", gameState.baseHP);
+    } 
+    
+    // Hapus koneksi dari room state server
+    clientInfo.roomCode = null;
+    clientInfo.role = null;
+
+    // Klien akan menerima "gameOver" dari broadcast di processGameOver.
+    // Tidak perlu kirim notifikasi lagi di sini.
+}
+
 // --- GAMEPLAY HANDLERS ---
 function handleTroopDeployed(ws, data) {
   const clientInfo = clients.get(ws);
@@ -679,10 +763,50 @@ async function handleBaseHit(ws, data) {
   });
 
   if (gameState.baseHP <= 0) {
-    await processGameOver(roomCode, "Attacker", "Base Destroyed");
+    await processGameOver(
+      roomCode,
+      "Attacker",
+      "Base Destroyed",
+      gameState.baseHP
+    );
   }
 }
+const DISCONNECT_GRACE_PERIOD_MS = 60000; // 60 seconds
 
+// Simpan timer untuk setiap room
+const disconnectTimers = new Map();
+
+// --- Logika processGameOver dipanggil oleh timer jika klien tidak kembali ---
+async function startGracePeriodTimer(
+  roomCode,
+  disconnectedRole,
+  disconnectedUserId
+) {
+  // Bersihkan timer lama jika ada
+  if (disconnectTimers.has(roomCode)) {
+    clearTimeout(disconnectTimers.get(roomCode));
+  }
+
+  const timer = setTimeout(async () => {
+    const gameState = rooms.get(roomCode);
+    if (gameState && gameState.gameStatus === "playing") {
+      const winnerRole =
+        disconnectedRole === "attacker" ? "Defender" : "Attacker";
+      const reason = "Opponent did not reconnect in time.";
+
+      console.log(`[${roomCode}] Grace period expired. Forcing game over.`);
+
+      // Mencatat kekalahan dan menghapus room
+      await processGameOver(roomCode, winnerRole, reason, gameState.baseHP);
+      // Klien yang tersisa akan menerima 'gameOver'
+    }
+    disconnectTimers.delete(roomCode);
+  }, DISCONNECT_GRACE_PERIOD_MS);
+
+  disconnectTimers.set(roomCode, timer);
+}
+
+// --- PERUBAHAN HANDLE DISCONNECT ---
 async function handlePlayerDisconnect(ws) {
   const clientInfo = clients.get(ws);
   if (!clientInfo || !clientInfo.roomCode) {
@@ -690,18 +814,36 @@ async function handlePlayerDisconnect(ws) {
     return;
   }
 
-  const { roomCode, role } = clientInfo;
+  const { roomCode, role, id: userId } = clientInfo;
   const gameState = rooms.get(roomCode);
+
+  // Hapus koneksi WS saat ini dari Map
+  clients.delete(ws);
 
   if (gameState) {
     if (gameState.gameStatus === "playing") {
-      const winnerRole = role === "attacker" ? "Defender" : "Attacker";
-      console.log(`Player ${clientInfo.username} disconnected. Game Over.`);
-      await processGameOver(roomCode, winnerRole, "Opponent Disconnected");
-    } else {
-      if (role === "attacker") gameState.attacker = null;
-      if (role === "defender") gameState.defender = null; // Delete match from database if still waiting
+      // Tandai pemain sebagai disconnected
+      const disconnectedPlayer =
+        role === "attacker" ? gameState.attacker : gameState.defender;
+      disconnectedPlayer.disconnected = true;
 
+      broadcastToRoom(roomCode, {
+        type: "playerDisconnected",
+        playerId: userId,
+        playerName: clientInfo.username,
+        role: role,
+      });
+
+      console.log(
+        `[${roomCode}] Player ${clientInfo.username} disconnected. Starting grace period...`
+      );
+
+      // Mulai timer untuk mencatat kekalahan jika tidak ada rejoin
+      startGracePeriodTimer(roomCode, role, userId);
+    } else {
+      // Jika status masih 'waiting', hapus pemain dari slot dan hapus match dari DB
+      if (role === "attacker") gameState.attacker = null;
+      if (role === "defender") gameState.defender = null;
       try {
         await pool.execute(
           "DELETE FROM matches WHERE room_code = ? AND status = 'waiting'",
@@ -715,11 +857,9 @@ async function handlePlayerDisconnect(ws) {
       if (!gameState.attacker && !gameState.defender) rooms.delete(roomCode);
     }
   }
-
-  clients.delete(ws);
 }
 
-async function processGameOver(roomCode, winnerRole, reason) {
+async function processGameOver(roomCode, winnerRole, reason, finalBaseHp) {
   const gameState = rooms.get(roomCode);
   if (!gameState || gameState.gameStatus === "finished") return;
 
@@ -773,11 +913,17 @@ async function processGameOver(roomCode, winnerRole, reason) {
       );
 
       await pool.execute(
-        `UPDATE matches SET
-          winner_id = ?, loser_id = ?, reason = ?, base_hp_final = ?, duration_sec = ?, status = 'finished'
-          WHERE room_code = ? AND status = 'playing'`,
-        [winnerId, loserId, reason, gameState.baseHP, durationSec, roomCode]
+        `UPDATE matches
+        SET winner_id = ?,
+            loser_id = ?,
+            reason = ?,
+            base_hp_final = ?,
+            duration_sec = ?,
+            status = 'finished'
+        WHERE room_code = ? AND status = 'playing'`,
+        [winnerId, loserId, reason, finalBaseHp, durationSec, roomCode]
       );
+
       console.log(`✅ Match ${roomCode} logged to database.`);
 
       console.log(

@@ -1,11 +1,9 @@
-// game.js - FULL VERSION (AUTH + GAMEPLAY + MYSQL)
+
 
 const CONFIG = {
-  // Ganti 'localhost' dengan IP laptop Anda jika main dari HP (misal: '192.168.1.5')
   WS_URL: "ws://localhost:8080",
 };
 
-// --- GLOBAL VARIABLES ---
 let gameState = {
   attacker: null,
   defender: null,
@@ -20,15 +18,20 @@ let gameState = {
 };
 
 // User & Connection State
-let currentUser = null; // Menyimpan data user yang login { id: 1, username: "Adi" }
+let currentUser = null;
 let ws = null;
 let reconnectInterval = null;
 
 // Game Room Variables
-let playerId = null; // ID sementara di room (untuk logika sender/receiver)
-let playerRole = null; // 'attacker' or 'defender'
+let playerId = null;
+let playerRole = null;
 let roomCode = null;
 let selectedUnit = null;
+
+let goldInterval = null;
+
+let mouseX = 0;
+let mouseY = 0;
 
 // Canvas Setup
 const canvas = document.getElementById("gameCanvas");
@@ -335,6 +338,7 @@ function handleServerMessage(data) {
       gameState.gameStartTime = Date.now();
       document.getElementById("waitingModal").classList.add("hidden");
       addMessage("Game Started!", "system");
+      startGoldGeneration()
       updateGameUI();
       break;
 
@@ -546,16 +550,23 @@ function returnToMenu() {
 
   roomCode = null;
   playerId = null;
-  playerRole = null; // UI Switch
+  playerRole = null; 
+
+  if (reconnectInterval) {
+    clearInterval(reconnectInterval);
+    reconnectInterval = null;
+  }
 
   document.getElementById("gameContainer").classList.add("hidden");
   document.getElementById("gameOverModal").classList.add("hidden");
-  document.getElementById("waitingModal").classList.add("hidden"); // Show Dashboard
+  document.getElementById("waitingModal").classList.add("hidden"); 
 
+  document.getElementById("authScreen").classList.add("hidden");
   document.getElementById("dashboardScreen").classList.remove("hidden");
-  document.getElementById("dashboardScreen").classList.add("flex"); // Refresh Stats & Leaderboard
+  document.getElementById("dashboardScreen").classList.add("flex");
 
-  requestDashboard();
+  console.log("Returning to dashboard. Requesting fresh data in 1 second...");
+  setTimeout(requestDashboard, 1000);
 }
 
 function confirmExit() {
@@ -564,9 +575,23 @@ function confirmExit() {
       "Exit game? You will return to dashboard. This might count as a loss if the game has started."
     )
   ) {
-    // Close sementara trigger disconnect di server, lalu biarkan auto-reconnect
-    ws.close();
-    location.reload();
+    // 1. Matikan interval gold
+    stopGoldGeneration();
+
+    // 2. Jika sedang bermain, kirim sinyal leave ke server (yang akan memicu processGameOver)
+    if (gameState.gameStatus === 'playing' && ws && ws.readyState === WebSocket.OPEN) {
+        sendToServer({ type: 'leaveMatch' });
+    }
+    
+    // 3. TUTUP koneksi (penting agar server mencatat disconnect jika sinyal leave gagal)
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close(1000, "User requested exit"); 
+    }
+    
+    // 4. Paksa kembali ke menu/dashboard.
+    // Gunakan setTimeout untuk memberi waktu sinyal WS terproses 
+    // sebelum kita me-reload state.
+    setTimeout(returnToMenu, 500); 
   }
 }
 
@@ -670,35 +695,29 @@ const TOWER_TYPES = {
   },
 };
 
-const PATHS = [
-  [
-    { x: 0, y: 150 },
-    { x: 300, y: 150 },
-    { x: 300, y: 100 },
-    { x: 600, y: 100 },
-    { x: 600, y: 150 },
-    { x: 900, y: 150 },
-  ],
-  [
-    { x: 0, y: 350 },
-    { x: 200, y: 350 },
-    { x: 200, y: 300 },
-    { x: 450, y: 300 },
-    { x: 450, y: 400 },
-    { x: 700, y: 400 },
-    { x: 700, y: 350 },
-    { x: 900, y: 350 },
-  ],
-  [
-    { x: 0, y: 550 },
-    { x: 300, y: 550 },
-    { x: 300, y: 600 },
-    { x: 600, y: 600 },
-    { x: 600, y: 550 },
-    { x: 900, y: 550 },
-  ],
-];
 const BASE_POS = { x: 900, y: 350 };
+
+
+const PATHS = [
+    // Path 1 (Top Lane) - Bergabung ke titik terakhir Path 2
+    [
+        { x: 0, y: 150 }, { x: 300, y: 150 }, { x: 300, y: 100 }, 
+        { x: 600, y: 100 }, { x: 600, y: 150 }, { x: 800, y: 150 },
+        { x: 800, y: 350 } // TITIK GABUNG KE BASE POS (Y:350)
+    ],
+    // Path 2 (Middle Lane) - Langsung ke BASE_POS
+    [
+        { x: 0, y: 350 }, { x: 200, y: 350 }, { x: 200, y: 300 },
+        { x: 450, y: 300 }, { x: 450, y: 400 }, { x: 700, y: 400 },
+        { x: 700, y: 350 }, { x: 900, y: 350 } // LANGSUNG KE BASE
+    ],
+    // Path 3 (Bottom Lane) - Bergabung ke titik terakhir Path 2
+    [
+        { x: 0, y: 550 }, { x: 300, y: 550 }, { x: 300, y: 600 },
+        { x: 600, y: 600 }, { x: 600, y: 550 }, { x: 800, y: 550 },
+        { x: 800, y: 350 } // TITIK GABUNG KE BASE POS (Y:350)
+    ]
+];
 
 function selectUnit(type) {
   selectedUnit = type;
@@ -706,6 +725,12 @@ function selectUnit(type) {
     .querySelectorAll(".unit-btn")
     .forEach((btn) => btn.classList.remove("selected"));
   document.getElementById("unit-" + type).classList.add("selected");
+
+  if (playerRole === 'defender' && TOWER_TYPES[type]) {
+        selectedUnitRange = TOWER_TYPES[type].range;
+    } else {
+        selectedUnitRange = 0;
+    }
 }
 
 function sendChat() {
@@ -717,9 +742,44 @@ function sendChat() {
   }
 }
 
+function startGoldGeneration() {
+    if (goldInterval) clearInterval(goldInterval);
+    goldInterval = setInterval(() => {
+        if (gameState.gameStatus !== 'playing' || !playerRole) return;
+        
+        // Logika sederhana: Setiap 5 detik, dapat 50 Gold
+        const goldGain = 50; 
+        
+        if (playerRole === 'attacker') {
+            gameState.attackerGold += goldGain;
+            // Kirim update ke server (hanya gold)
+            sendToServer({ type: 'updateGold', role: 'attacker', gold: gameState.attackerGold });
+        } else {
+            gameState.defenderGold += goldGain;
+            sendToServer({ type: 'updateGold', role: 'defender', gold: gameState.defenderGold });
+        }
+        updateGameUI();
+    }, 5000); 
+}
+
+function stopGoldGeneration() {
+    if (goldInterval) clearInterval(goldInterval);
+    goldInterval = null;
+}
+
+function drawRangeCircle(x, y) {
+    if (selectedUnitRange > 0) {
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x, y, selectedUnitRange, 0, Math.PI * 2);
+        ctx.stroke();
+    }
+}
+
 // Canvas Click Handler
 canvas.addEventListener("click", (e) => {
-  if (!selectedUnit || gameState.gameStatus !== "playing") return; // Scaling correction for responsive canvas
+  if (!selectedUnit || gameState.gameStatus !== "playing") return; 
 
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
@@ -729,6 +789,23 @@ canvas.addEventListener("click", (e) => {
 
   if (playerRole === "attacker") deployTroop(x, y);
   else if (playerRole === "defender") placeTower(x, y);
+});
+
+canvas?.addEventListener('mousemove', (e) => {
+    if (playerRole !== 'defender' || gameState.gameStatus !== 'playing') return;
+    
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+
+    drawRangeCircle(x, y);
+});
+
+// Hapus Lingkaran Range saat mouse keluar
+canvas?.addEventListener('mouseout', () => {
+    selectedUnitRange = 0;
 });
 
 function deployTroop(x, y) {
@@ -1002,7 +1079,9 @@ function drawGameMap() {
     ctx.stroke();
     ctx.fillStyle = "white";
     ctx.font = "bold 16px Arial";
-    ctx.fillText(`Lane ${idx + 1}`, 10, path[0].y - 30);
+    ctx.textAlign = "left";
+    // ctx.fillText(`Lane ${idx + 1}`, 10, path[0].y - 30);
+    ctx.fillText(`Lane ${idx + 1}`, 10, path[0].y - 45);
   });
   ctx.fillStyle = "#3b82f6";
   ctx.beginPath();
@@ -1050,6 +1129,17 @@ function drawTower(t, type) {
   ctx.fillStyle = "#fff";
   ctx.font = "16px Arial";
   ctx.fillText(type.emoji, t.x, t.y);
+
+  if (playerRole === 'defender') {
+        const dist = Math.sqrt((t.x - mouseX)**2 + (t.y - mouseY)**2);
+        if (dist < 20) { // Jika kursor dekat tower
+            ctx.strokeStyle = type.color + "55"; // Semi-transparan
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(t.x, t.y, type.range, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+    }
 }
 
 // WINDOW EXPORTS
