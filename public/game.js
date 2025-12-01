@@ -1,9 +1,13 @@
+// game.js - FINAL VERSION WITH AUTO REFRESH ROOMS
 
+// --- SAFETY CHECK ---
+// Jika server lupa mengirim config, kita pakai default localhost
+if (typeof CONFIG === "undefined") {
+  console.warn("⚠️ Config gagal dimuat. Fallback ke localhost.");
+  var CONFIG = { };
+}
 
-const CONFIG = {
-  WS_URL: "ws://localhost:8080",
-};
-
+// --- GLOBAL VARIABLES ---
 let gameState = {
   attacker: null,
   defender: null,
@@ -13,7 +17,7 @@ let gameState = {
   towers: [],
   troops: [],
   projectiles: [],
-  gameStatus: "waiting", // waiting, playing, finished
+  gameStatus: "waiting",
   gameStartTime: 0,
 };
 
@@ -24,9 +28,11 @@ let reconnectInterval = null;
 
 // Game Room Variables
 let playerId = null;
+let matchesInterval = null; // <--- INI SEKARANG AKTIF
 let playerRole = null;
 let roomCode = null;
 let selectedUnit = null;
+let selectedUnitRange = 0; // Variabel range visual
 
 let goldInterval = null;
 
@@ -38,12 +44,12 @@ const canvas = document.getElementById("gameCanvas");
 const ctx = canvas.getContext("2d");
 
 // -------------------------------------------------------
-// --- 1. AUTHENTICATION & DASHBOARD LOGIC (NEW) ---
+// --- 1. AUTHENTICATION & DASHBOARD LOGIC ---
 // -------------------------------------------------------
 
-let authMode = "login"; // 'login' or 'register'
+let authMode = "login";
 
-// --- SESSION MANAGEMENT (LOCAL STORAGE) ---
+// --- SESSION MANAGEMENT ---
 function saveSession(user) {
   localStorage.setItem("td_session_id", user.id);
   localStorage.setItem("td_session_username", user.username);
@@ -58,29 +64,22 @@ function checkSessionAndStart() {
   const storedUsername = localStorage.getItem("td_session_username");
   const storedId = localStorage.getItem("td_session_id");
 
-  // Jika ada sesi di localStorage
   if (storedUsername && storedId) {
     currentUser = { id: storedId, username: storedUsername };
-
-    // Langsung tampilkan dashboard, lalu coba koneksi WS & kirim getDashboard
     document.getElementById("authScreen").classList.add("hidden");
     document.getElementById("dashboardScreen").classList.remove("hidden");
     document.getElementById("dashboardScreen").classList.add("flex");
-
-    // Koneksi dan segera minta data dashboard
     connectWebSocket(requestDashboard);
   } else {
-    // Jika tidak ada sesi, tampilkan login screen dan konek WS
     document.getElementById("authScreen").classList.remove("hidden");
     connectWebSocket();
   }
 }
-// --- END SESSION MANAGEMENT ---
 
 function toggleAuth(mode) {
   authMode = mode;
   const btnText = mode === "login" ? "Login" : "Register";
-  document.getElementById("btnSubmitAuth").textContent = btnText; // Style Tabs Visual
+  document.getElementById("btnSubmitAuth").textContent = btnText;
 
   if (mode === "login") {
     document.getElementById("tabLogin").className =
@@ -104,7 +103,7 @@ function submitAuth() {
     document.getElementById("authMessage").textContent =
       "Please fill all fields";
     return;
-  } // Pastikan WS terkoneksi sebelum kirim auth
+  }
 
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     connectWebSocket(() => {
@@ -116,11 +115,7 @@ function submitAuth() {
 }
 
 function sendAuthRequest(username, password) {
-  sendToServer({
-    type: authMode, // 'login' atau 'register'
-    username: username,
-    password: password,
-  });
+  sendToServer({ type: authMode, username: username, password: password });
 }
 
 function requestDashboard() {
@@ -132,63 +127,53 @@ function requestAvailableMatches() {
 }
 
 function updateDashboardUI(stats, leaderboard) {
-  // 1. Update Profile Stats
   document.getElementById("dashUsername").textContent = currentUser.username;
-  document.getElementById("dashTrophies").textContent = stats.trophies;
-  document.getElementById("dashWins").textContent = stats.wins;
-  document.getElementById("dashLosses").textContent = stats.losses;
-  document.getElementById("dashMatches").textContent = stats.matches_played; // 2. Update Leaderboard Table
+  document.getElementById("dashTrophies").textContent = stats.trophies || 0;
+  document.getElementById("dashWins").textContent = stats.wins || 0;
+  document.getElementById("dashLosses").textContent = stats.losses || 0;
+  document.getElementById("dashMatches").textContent =
+    stats.matches_played || 0;
 
   const tbody = document.getElementById("leaderboardBody");
   tbody.innerHTML = "";
 
-  if (leaderboard.length === 0) {
+  if (!leaderboard || leaderboard.length === 0) {
     tbody.innerHTML =
       '<tr><td colspan="3" class="p-4 text-center text-gray-500">No players yet.</td></tr>';
   } else {
     leaderboard.forEach((player, index) => {
       const row = document.createElement("tr");
       row.className = "hover:bg-white/5 transition border-b border-white/5";
-
       let rankDisplay = index + 1;
       if (index === 0) rankDisplay = "🥇";
       if (index === 1) rankDisplay = "🥈";
       if (index === 2) rankDisplay = "🥉";
 
       row.innerHTML = `
-                <td class="p-3 font-bold ${
-        index < 3 ? "text-yellow-400" : "text-gray-400"
-      }">${rankDisplay}</td>
-                <td class="p-3 font-semibold text-white">${player.username}</td>
-                <td class="p-3 text-right font-bold text-yellow-400">${
-        player.trophies
-      } 🏆</td>
-            `;
+        <td class="p-3 font-bold ${
+          index < 3 ? "text-yellow-400" : "text-gray-400"
+        }">${rankDisplay}</td>
+        <td class="p-3 font-semibold text-white">${player.username}</td>
+        <td class="p-3 text-right font-bold text-yellow-400">${
+          player.trophies
+        } 🏆</td>
+      `;
       tbody.appendChild(row);
     });
   }
-}
-
-function requestDashboard() {
-  sendToServer({ type: "getDashboard" });
-}
-
-function requestAvailableMatches() {
-  sendToServer({ type: "getAvailableMatches" });
 }
 
 function updateAvailableMatchesUI(matches) {
   const tbody = document.getElementById("availableMatchesBody");
   tbody.innerHTML = "";
 
-  if (matches.length === 0) {
+  if (!matches || matches.length === 0) {
     tbody.innerHTML =
-      '<tr><td colspan="4" class="p-4 text-center text-gray-500">No available matches</td></tr>';
+      '<tr><td colspan="5" class="p-4 text-center text-gray-500">No available matches</td></tr>';
   } else {
     matches.forEach((match) => {
       const row = document.createElement("tr");
       row.className = "hover:bg-white/5 transition border-b border-white/5";
-
       const timeAgo = getTimeAgo(new Date(match.created_at));
       const roleNeeded =
         match.needed_role === "attacker" ? "⚔️ Attacker" : "🛡️ Defender";
@@ -201,10 +186,7 @@ function updateAvailableMatchesUI(matches) {
         <td class="p-3 ${roleColor} font-semibold">${roleNeeded}</td>
         <td class="p-3 text-gray-400 text-xs">${timeAgo}</td>
         <td class="p-3 text-right">
-          <button onclick="quickJoinMatch('${match.room_code}')" 
-                  class="bg-green-600 hover:bg-green-700 text-white px-4 py-1 rounded-lg text-sm font-bold transition">
-            Join
-          </button>
+          <button onclick="quickJoinMatch('${match.room_code}')" class="bg-green-600 hover:bg-green-700 text-white px-4 py-1 rounded-lg text-sm font-bold transition">Join</button>
         </td>
       `;
       tbody.appendChild(row);
@@ -234,10 +216,7 @@ function connectWebSocket(callback) {
     console.log("WS Connected");
     if (reconnectInterval) clearInterval(reconnectInterval);
     if (storedId) {
-      sendToServer({
-        type: "reauth",
-        id: storedId,
-      });
+      sendToServer({ type: "reauth", id: storedId });
     } else {
       if (callback) callback();
     }
@@ -253,7 +232,7 @@ function connectWebSocket(callback) {
   };
 
   ws.onclose = () => {
-    console.log("WS Disconnected"); // Auto reconnect logic
+    console.log("WS Disconnected");
     if (!reconnectInterval) {
       reconnectInterval = setInterval(() => {
         console.log("Reconnecting...");
@@ -270,19 +249,17 @@ function sendToServer(data) {
 }
 
 function handleServerMessage(data) {
-  switch (
-    data.type // --- AUTH RESPONSES ---
-  ) {
+  switch (data.type) {
     case "registerSuccess":
       document.getElementById("authMessage").className =
         "text-center text-green-400 text-sm mt-4";
       document.getElementById("authMessage").textContent = data.message;
-      setTimeout(() => toggleAuth("login"), 1500); // Auto switch ke login tab
+      setTimeout(() => toggleAuth("login"), 1500);
       break;
 
     case "loginSuccess":
-      currentUser = { id: data.id, username: data.username }; // Simpan ID dari server
-      saveSession(currentUser); // Simpan sesi // Sembunyikan Auth Screen, Tampilkan Dashboard
+      currentUser = { id: data.id, username: data.username };
+      saveSession(currentUser);
       document.getElementById("authScreen").classList.add("hidden");
       document.getElementById("dashboardScreen").classList.remove("hidden");
       document.getElementById("dashboardScreen").classList.add("flex");
@@ -295,17 +272,32 @@ function handleServerMessage(data) {
       break;
 
     case "reauthSuccess":
-      console.log("Re-authentication successful. Fetching dashboard data...");
       if (data.roomCode && data.role) {
-        rejoinMatch(data.roomCode); // Jika sedang match, langsung rejoin
+        rejoinMatch(data.roomCode);
       } else {
-        requestDashboard(); // Jika tidak ada match, tampilkan dashboard
+        requestDashboard();
       }
       break;
 
+    // --- BAGIAN INI SUDAH DIPERBAIKI (AUTO REFRESH) ---
     case "dashboardData":
       updateDashboardUI(data.stats, data.leaderboard);
-      requestAvailableMatches(); // Panggil List Match setelah dashboard dimuat
+      requestAvailableMatches(); // Request pertama kali
+
+      // Hapus interval lama agar tidak double
+      if (matchesInterval) clearInterval(matchesInterval);
+
+      // Set interval baru: Refresh setiap 3 detik
+      matchesInterval = setInterval(() => {
+        // Hanya refresh jika dashboard terlihat
+        if (
+          !document
+            .getElementById("dashboardScreen")
+            .classList.contains("hidden")
+        ) {
+          requestAvailableMatches();
+        }
+      }, 3000);
       break;
 
     case "availableMatches":
@@ -314,10 +306,13 @@ function handleServerMessage(data) {
 
     case "roomCreated":
     case "roomJoined":
+      // Matikan auto-refresh karena sudah masuk game
+      if (matchesInterval) clearInterval(matchesInterval);
+
       roomCode = data.roomCode;
       playerId = data.playerId;
       playerRole = data.role;
-      gameState = { ...gameState, ...data.data }; // Switch UI ke Game Mode
+      gameState = { ...gameState, ...data.data };
 
       document.getElementById("createMatchModal").classList.add("hidden");
       document.getElementById("joinMatchModal").classList.add("hidden");
@@ -338,7 +333,7 @@ function handleServerMessage(data) {
       gameState.gameStartTime = Date.now();
       document.getElementById("waitingModal").classList.add("hidden");
       addMessage("Game Started!", "system");
-      startGoldGeneration()
+      startGoldGeneration();
       updateGameUI();
       break;
 
@@ -348,7 +343,7 @@ function handleServerMessage(data) {
       else gameState.defender = { id: data.playerId, name: data.playerName };
       addMessage(`${data.playerName} joined.`, "system");
       updateGameUI();
-      break; // --- GAMEPLAY ACTIONS ---
+      break;
 
     case "troopDeployed":
       if (data.playerId !== playerId) {
@@ -361,6 +356,11 @@ function handleServerMessage(data) {
         gameState.towers.push(data.tower);
         gameState.defenderGold = data.gold;
       }
+      break;
+    case "updateGold":
+      if (data.role === "attacker") gameState.attackerGold = data.gold;
+      else gameState.defenderGold = data.gold;
+      updateGameUI();
       break;
     case "baseHit":
       gameState.baseHP = data.baseHP;
@@ -403,9 +403,7 @@ function setupPlayerRoleUI(role) {
 
 function updateGameUI() {
   const gameContainer = document.getElementById("gameContainer");
-  if (!gameContainer || gameContainer.classList.contains("hidden")) {
-    return;
-  }
+  if (!gameContainer || gameContainer.classList.contains("hidden")) return;
 
   const attackerGoldEl = document.getElementById("attackerGold");
   const defenderGoldEl = document.getElementById("defenderGold");
@@ -414,15 +412,7 @@ function updateGameUI() {
   const defenderNameEl = document.getElementById("defenderName");
   const countdownEl = document.getElementById("countdown");
 
-  if (
-    !attackerGoldEl ||
-    !defenderGoldEl ||
-    !defenderHPEl ||
-    !attackerNameEl ||
-    !defenderNameEl
-  ) {
-    return;
-  }
+  if (!attackerGoldEl) return;
 
   attackerGoldEl.textContent = gameState.attackerGold;
   defenderGoldEl.textContent = gameState.defenderGold;
@@ -447,8 +437,8 @@ function addMessage(text, type) {
   const log = document.getElementById("messageLog");
   const div = document.createElement("div");
   div.textContent = text;
-  if (type === "chat") div.className = "text-white font-bold";
-  else div.className = "text-gray-400 italic";
+  div.className =
+    type === "chat" ? "text-white font-bold" : "text-gray-400 italic";
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
 }
@@ -456,22 +446,20 @@ function addMessage(text, type) {
 function showGameOverModal(winner, reason) {
   document.getElementById("gameOverModal").classList.remove("hidden");
   const isWin = playerRole && playerRole.toLowerCase() === winner.toLowerCase();
-
   document.getElementById("winnerText").textContent = isWin
     ? "VICTORY!"
     : "DEFEAT";
   document.getElementById("winnerEmoji").textContent = isWin ? "🏆" : "💀";
-
   document.getElementById("gameResult").innerHTML = `
-        <p>Winner: <span class="font-bold text-yellow-400">${winner}</span></p>
-        <p>Reason: ${reason}</p>
-        <p>Final Base HP: ${gameState.baseHP}</p>
-        ${
-    isWin
-      ? '<p class="text-green-400 mt-2 font-bold">+10 Trophies!</p>'
-      : '<p class="text-red-400 mt-2 font-bold">+0 Trophies</p>'
-  }
-    `;
+        <p>Winner: <span class="font-bold text-yellow-400">${winner}</span></p>
+        <p>Reason: ${reason}</p>
+        <p>Final Base HP: ${gameState.baseHP}</p>
+        ${
+          isWin
+            ? '<p class="text-green-400 mt-2 font-bold">+10 Trophies!</p>'
+            : '<p class="text-red-400 mt-2 font-bold">+0 Trophies</p>'
+        }
+    `;
 }
 
 // -------------------------------------------------------
@@ -481,12 +469,10 @@ function showGameOverModal(winner, reason) {
 function showCreateMatch() {
   document.getElementById("createMatchModal").classList.remove("hidden");
 }
-
 function showJoinMatch() {
   document.getElementById("joinMatchModal").classList.remove("hidden");
   requestAvailableMatches();
 }
-
 function backToDashboard() {
   document.getElementById("createMatchModal").classList.add("hidden");
   document.getElementById("joinMatchModal").classList.add("hidden");
@@ -502,13 +488,11 @@ function selectCreateRole(role) {
   else document.getElementById("createDefender").classList.add("selected");
 }
 
-// Create Room (Tidak perlu kirim Nama lagi, server ambil dari session login)
 function createMatch() {
   if (!selectedCreateRoleValue) return alert("Select a role first!");
   sendToServer({ type: "createRoom", role: selectedCreateRoleValue });
 }
 
-// Join Room
 function joinMatch() {
   const code = document.getElementById("roomCodeInput").value.trim();
   if (code.length !== 6) return alert("Invalid Code");
@@ -518,7 +502,6 @@ function joinMatch() {
 function quickJoinMatch(code) {
   sendToServer({ type: "joinRoom", roomCode: code });
 }
-
 function rejoinMatch(code) {
   sendToServer({ type: "rejoinRoom", roomCode: code });
 }
@@ -526,7 +509,6 @@ function rejoinMatch(code) {
 function cancelWaiting() {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.close();
-
     location.reload();
   } else {
     returnToMenu();
@@ -534,7 +516,6 @@ function cancelWaiting() {
 }
 
 function returnToMenu() {
-  // Reset Client State
   gameState = {
     attacker: null,
     defender: null,
@@ -547,11 +528,9 @@ function returnToMenu() {
     gameStatus: "waiting",
     gameStartTime: 0,
   };
-
   roomCode = null;
   playerId = null;
-  playerRole = null; 
-
+  playerRole = null;
   if (reconnectInterval) {
     clearInterval(reconnectInterval);
     reconnectInterval = null;
@@ -559,51 +538,39 @@ function returnToMenu() {
 
   document.getElementById("gameContainer").classList.add("hidden");
   document.getElementById("gameOverModal").classList.add("hidden");
-  document.getElementById("waitingModal").classList.add("hidden"); 
-
+  document.getElementById("waitingModal").classList.add("hidden");
   document.getElementById("authScreen").classList.add("hidden");
   document.getElementById("dashboardScreen").classList.remove("hidden");
   document.getElementById("dashboardScreen").classList.add("flex");
 
-  console.log("Returning to dashboard. Requesting fresh data in 1 second...");
-  setTimeout(requestDashboard, 1000);
+  // Refresh data dan nyalakan lagi interval
+  requestDashboard();
 }
 
 function confirmExit() {
-  if (
-    confirm(
-      "Exit game? You will return to dashboard. This might count as a loss if the game has started."
-    )
-  ) {
-    // 1. Matikan interval gold
+  if (confirm("Exit game? You will return to dashboard.")) {
     stopGoldGeneration();
-
-    // 2. Jika sedang bermain, kirim sinyal leave ke server (yang akan memicu processGameOver)
-    if (gameState.gameStatus === 'playing' && ws && ws.readyState === WebSocket.OPEN) {
-        sendToServer({ type: 'leaveMatch' });
-    }
-    
-    // 3. TUTUP koneksi (penting agar server mencatat disconnect jika sinyal leave gagal)
-    if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close(1000, "User requested exit"); 
-    }
-    
-    // 4. Paksa kembali ke menu/dashboard.
-    // Gunakan setTimeout untuk memberi waktu sinyal WS terproses 
-    // sebelum kita me-reload state.
-    setTimeout(returnToMenu, 500); 
+    if (
+      gameState.gameStatus === "playing" &&
+      ws &&
+      ws.readyState === WebSocket.OPEN
+    )
+      sendToServer({ type: "leaveMatch" });
+    if (ws && ws.readyState === WebSocket.OPEN)
+      ws.close(1000, "User requested exit");
+    setTimeout(returnToMenu, 500);
   }
 }
 
 function logout() {
   if (confirm("Are you sure you want to logout?")) {
-    clearSession(); // Hapus sesi dari localStorage
+    clearSession();
     window.location.reload();
   }
 }
 
 // -------------------------------------------------------
-// --- 5. GAME LOGIC & CANVAS (ORIGINAL CODE INTEGRATED) ---
+// --- 5. GAME LOGIC & CANVAS ---
 // -------------------------------------------------------
 
 // CONSTANTS
@@ -696,27 +663,35 @@ const TOWER_TYPES = {
 };
 
 const BASE_POS = { x: 900, y: 350 };
-
-
 const PATHS = [
-    // Path 1 (Top Lane) - Bergabung ke titik terakhir Path 2
-    [
-        { x: 0, y: 150 }, { x: 300, y: 150 }, { x: 300, y: 100 }, 
-        { x: 600, y: 100 }, { x: 600, y: 150 }, { x: 800, y: 150 },
-        { x: 800, y: 350 } // TITIK GABUNG KE BASE POS (Y:350)
-    ],
-    // Path 2 (Middle Lane) - Langsung ke BASE_POS
-    [
-        { x: 0, y: 350 }, { x: 200, y: 350 }, { x: 200, y: 300 },
-        { x: 450, y: 300 }, { x: 450, y: 400 }, { x: 700, y: 400 },
-        { x: 700, y: 350 }, { x: 900, y: 350 } // LANGSUNG KE BASE
-    ],
-    // Path 3 (Bottom Lane) - Bergabung ke titik terakhir Path 2
-    [
-        { x: 0, y: 550 }, { x: 300, y: 550 }, { x: 300, y: 600 },
-        { x: 600, y: 600 }, { x: 600, y: 550 }, { x: 800, y: 550 },
-        { x: 800, y: 350 } // TITIK GABUNG KE BASE POS (Y:350)
-    ]
+  [
+    { x: 0, y: 150 },
+    { x: 300, y: 150 },
+    { x: 300, y: 100 },
+    { x: 600, y: 100 },
+    { x: 600, y: 150 },
+    { x: 800, y: 150 },
+    { x: 800, y: 350 },
+  ],
+  [
+    { x: 0, y: 350 },
+    { x: 200, y: 350 },
+    { x: 200, y: 300 },
+    { x: 450, y: 300 },
+    { x: 450, y: 400 },
+    { x: 700, y: 400 },
+    { x: 700, y: 350 },
+    { x: 900, y: 350 },
+  ],
+  [
+    { x: 0, y: 550 },
+    { x: 300, y: 550 },
+    { x: 300, y: 600 },
+    { x: 600, y: 600 },
+    { x: 600, y: 550 },
+    { x: 800, y: 550 },
+    { x: 800, y: 350 },
+  ],
 ];
 
 function selectUnit(type) {
@@ -725,138 +700,124 @@ function selectUnit(type) {
     .querySelectorAll(".unit-btn")
     .forEach((btn) => btn.classList.remove("selected"));
   document.getElementById("unit-" + type).classList.add("selected");
-
-  if (playerRole === 'defender' && TOWER_TYPES[type]) {
-        selectedUnitRange = TOWER_TYPES[type].range;
-    } else {
-        selectedUnitRange = 0;
-    }
+  if (playerRole === "defender" && TOWER_TYPES[type])
+    selectedUnitRange = TOWER_TYPES[type].range;
+  else selectedUnitRange = 0;
 }
 
 function sendChat() {
   const input = document.getElementById("chatInput");
   const message = input.value.trim();
   if (message) {
-    sendToServer({ type: "chat", message: message }); // Client side chat echo removed here because server broadcasts it back
+    sendToServer({ type: "chat", message: message });
     input.value = "";
   }
 }
 
 function startGoldGeneration() {
-    if (goldInterval) clearInterval(goldInterval);
-    goldInterval = setInterval(() => {
-        if (gameState.gameStatus !== 'playing' || !playerRole) return;
-        
-        // Logika sederhana: Setiap 5 detik, dapat 50 Gold
-        const goldGain = 50; 
-        
-        if (playerRole === 'attacker') {
-            gameState.attackerGold += goldGain;
-            // Kirim update ke server (hanya gold)
-            sendToServer({ type: 'updateGold', role: 'attacker', gold: gameState.attackerGold });
-        } else {
-            gameState.defenderGold += goldGain;
-            sendToServer({ type: 'updateGold', role: 'defender', gold: gameState.defenderGold });
-        }
-        updateGameUI();
-    }, 5000); 
+  if (goldInterval) clearInterval(goldInterval);
+  goldInterval = setInterval(() => {
+    if (gameState.gameStatus !== "playing" || !playerRole) return;
+    const goldGain = 50;
+    if (playerRole === "attacker") {
+      gameState.attackerGold += goldGain;
+      sendToServer({
+        type: "updateGold",
+        role: "attacker",
+        gold: gameState.attackerGold,
+      });
+    } else {
+      gameState.defenderGold += goldGain;
+      sendToServer({
+        type: "updateGold",
+        role: "defender",
+        gold: gameState.defenderGold,
+      });
+    }
+    updateGameUI();
+  }, 5000);
 }
 
 function stopGoldGeneration() {
-    if (goldInterval) clearInterval(goldInterval);
-    goldInterval = null;
+  if (goldInterval) clearInterval(goldInterval);
+  goldInterval = null;
 }
 
 function drawRangeCircle(x, y) {
-    if (selectedUnitRange > 0) {
-        ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(x, y, selectedUnitRange, 0, Math.PI * 2);
-        ctx.stroke();
-    }
+  if (selectedUnitRange > 0) {
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x, y, selectedUnitRange, 0, Math.PI * 2);
+    ctx.stroke();
+  }
 }
 
-// Canvas Click Handler
 canvas.addEventListener("click", (e) => {
-  if (!selectedUnit || gameState.gameStatus !== "playing") return; 
-
+  if (!selectedUnit || gameState.gameStatus !== "playing") return;
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width / rect.width;
   const scaleY = canvas.height / rect.height;
   const x = (e.clientX - rect.left) * scaleX;
   const y = (e.clientY - rect.top) * scaleY;
-
   if (playerRole === "attacker") deployTroop(x, y);
   else if (playerRole === "defender") placeTower(x, y);
 });
 
-canvas?.addEventListener('mousemove', (e) => {
-    if (playerRole !== 'defender' || gameState.gameStatus !== 'playing') return;
-    
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    const x = (e.clientX - rect.left) * scaleX;
-    const y = (e.clientY - rect.top) * scaleY;
-
-    drawRangeCircle(x, y);
+canvas?.addEventListener("mousemove", (e) => {
+  if (playerRole !== "defender" || gameState.gameStatus !== "playing") return;
+  const rect = canvas.getBoundingClientRect();
+  mouseX = (e.clientX - rect.left) * (canvas.width / rect.width);
+  mouseY = (e.clientY - rect.top) * (canvas.height / rect.height);
 });
 
-// Hapus Lingkaran Range saat mouse keluar
-canvas?.addEventListener('mouseout', () => {
-    selectedUnitRange = 0;
+canvas?.addEventListener("mouseout", () => {
+  selectedUnitRange = 0;
 });
 
 function deployTroop(x, y) {
-  const troopType = TROOP_TYPES[selectedUnit];
-  if (gameState.attackerGold < troopType.cost) {
+  const type = TROOP_TYPES[selectedUnit];
+  if (gameState.attackerGold < type.cost) {
     addMessage("Not enough gold!", "error");
     return;
-  } // Lane Detection
-
+  }
   let lane = -1;
   if (y > 100 && y < 200) lane = 0;
   else if (y > 300 && y < 400) lane = 1;
   else if (y > 500 && y < 600) lane = 2;
-
   if (lane === -1) {
     addMessage("Click near a lane!", "error");
     return;
   }
-
   const path = PATHS[lane];
   const troop = {
     id: "troop_" + Date.now(),
     type: selectedUnit,
-    health: troopType.health,
-    maxHealth: troopType.maxHealth,
+    health: type.health,
+    maxHealth: type.maxHealth,
     lane: lane,
     pathIndex: 0,
     progress: 0,
     x: path[0].x,
     y: path[0].y,
   };
-
   gameState.troops.push(troop);
-  gameState.attackerGold -= troopType.cost;
-
+  gameState.attackerGold -= type.cost;
   sendToServer({
     type: "troopDeployed",
     troop: troop,
     gold: gameState.attackerGold,
   });
-  addMessage(`Deployed ${troopType.name}`, "tower");
+  addMessage(`Deployed ${type.name}`, "tower");
   updateGameUI();
 }
 
 function placeTower(x, y) {
-  const towerType = TOWER_TYPES[selectedUnit];
-  if (gameState.defenderGold < towerType.cost) {
+  const type = TOWER_TYPES[selectedUnit];
+  if (gameState.defenderGold < type.cost) {
     addMessage("Not enough gold!", "error");
     return;
   }
-
   if (isOnAnyPath(x, y, 30)) {
     addMessage("Too close to path!", "error");
     return;
@@ -865,7 +826,6 @@ function placeTower(x, y) {
     addMessage("Too close to other tower!", "error");
     return;
   }
-
   const tower = {
     id: "tower_" + Date.now(),
     type: selectedUnit,
@@ -874,27 +834,23 @@ function placeTower(x, y) {
     lastShot: 0,
   };
   gameState.towers.push(tower);
-  gameState.defenderGold -= towerType.cost;
-
+  gameState.defenderGold -= type.cost;
   sendToServer({
     type: "towerPlaced",
     tower: tower,
     gold: gameState.defenderGold,
   });
-  addMessage(`Placed ${towerType.name}`, "tower");
+  addMessage(`Placed ${type.name}`, "tower");
   updateGameUI();
 }
 
-// Logic Helpers
-function isTooCloseToOtherTowers(x, y, minDistance) {
-  for (const tower of gameState.towers) {
-    const dist = Math.sqrt((tower.x - x) ** 2 + (tower.y - y) ** 2);
-    if (dist < minDistance) return true;
-  }
-  return false;
+function isTooCloseToOtherTowers(x, y, min) {
+  return gameState.towers.some(
+    (t) => Math.sqrt((t.x - x) ** 2 + (t.y - y) ** 2) < min
+  );
 }
 
-function isOnAnyPath(x, y, threshold) {
+function isOnAnyPath(x, y, thres) {
   for (const path of PATHS) {
     for (let i = 0; i < path.length - 1; i++) {
       const dist = distanceToLineSegment(
@@ -905,7 +861,7 @@ function isOnAnyPath(x, y, threshold) {
         path[i + 1].x,
         path[i + 1].y
       );
-      if (dist < threshold) return true;
+      if (dist < thres) return true;
     }
   }
   return false;
@@ -926,65 +882,55 @@ function gameLoop() {
     updateGameUI();
     return;
   }
-
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  drawGameMap(); // LOGIC TROOPS
+  drawGameMap();
 
   for (let i = gameState.troops.length - 1; i >= 0; i--) {
-    const troop = gameState.troops[i];
-    const type = TROOP_TYPES[troop.type];
-    const path = PATHS[troop.lane]; // Move
-
-    if (troop.pathIndex < path.length - 1) {
-      const curr = path[troop.pathIndex];
-      const next = path[troop.pathIndex + 1];
-      const segDist = Math.sqrt(
-        (next.x - curr.x) ** 2 + (next.y - curr.y) ** 2
-      );
-      troop.progress += type.speed;
-      if (segDist > 0 && troop.progress >= segDist) {
-        troop.progress -= segDist;
-        troop.pathIndex++;
-      } // Interpolate
-      const pStart = path[troop.pathIndex];
-      const pEnd = path[troop.pathIndex + 1] || BASE_POS;
-      const dist =
-        Math.sqrt((pEnd.x - pStart.x) ** 2 + (pEnd.y - pStart.y) ** 2) || 1;
-      const t = troop.progress / dist;
-      troop.x = pStart.x + (pEnd.x - pStart.x) * t;
-      troop.y = pStart.y + (pEnd.y - pStart.y) * t;
+    const t = gameState.troops[i];
+    const type = TROOP_TYPES[t.type];
+    const path = PATHS[t.lane];
+    if (t.pathIndex < path.length - 1) {
+      const curr = path[t.pathIndex];
+      const next = path[t.pathIndex + 1];
+      const dist = Math.sqrt((next.x - curr.x) ** 2 + (next.y - curr.y) ** 2);
+      t.progress += type.speed;
+      if (dist > 0 && t.progress >= dist) {
+        t.progress -= dist;
+        t.pathIndex++;
+      }
+      const p1 = path[t.pathIndex];
+      const p2 = path[t.pathIndex + 1] || BASE_POS;
+      const d = Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2) || 1;
+      const r = t.progress / d;
+      t.x = p1.x + (p2.x - p1.x) * r;
+      t.y = p1.y + (p2.y - p1.y) * r;
     } else {
-      // Base Hit
-      if (Math.abs(troop.x - BASE_POS.x) < 5) {
+      if (Math.abs(t.x - BASE_POS.x) < 5) {
         gameState.troops.splice(i, 1);
         gameState.baseHP -= type.damage;
-        if (playerRole === "attacker") {
+        if (playerRole === "attacker")
           sendToServer({
             type: "baseHit",
             baseHP: gameState.baseHP,
             damage: type.damage,
           });
-        }
         continue;
       } else {
-        // Final stretch to base center
-        const dx = BASE_POS.x - troop.x;
-        const dy = BASE_POS.y - troop.y;
+        const dx = BASE_POS.x - t.x;
+        const dy = BASE_POS.y - t.y;
         const d = Math.sqrt(dx * dx + dy * dy);
-        troop.x += (dx / d) * type.speed;
-        troop.y += (dy / d) * type.speed;
+        t.x += (dx / d) * type.speed;
+        t.y += (dy / d) * type.speed;
       }
     }
-    drawTroop(troop, type);
-  } // LOGIC TOWERS & PROJECTILES
+    drawTroop(t, type);
+  }
 
   const now = Date.now();
   gameState.towers.forEach((tower) => {
     const type = TOWER_TYPES[tower.type];
     drawTower(tower, type);
-
     if (now - tower.lastShot >= type.speed) {
-      // Find Target
       const target = findTarget(tower, type.range);
       if (target) {
         tower.lastShot = now;
@@ -1002,42 +948,38 @@ function gameLoop() {
         });
       }
     }
-  }); // LOGIC PROJECTILES
+  });
 
   for (let i = gameState.projectiles.length - 1; i >= 0; i--) {
-    const proj = gameState.projectiles[i];
-    const target = gameState.troops.find((t) => t.id === proj.targetId);
+    const p = gameState.projectiles[i];
+    const target = gameState.troops.find((t) => t.id === p.targetId);
     if (target) {
-      proj.targetX = target.x;
-      proj.targetY = target.y;
+      p.targetX = target.x;
+      p.targetY = target.y;
     }
-
-    const dx = proj.targetX - proj.x;
-    const dy = proj.targetY - proj.y;
+    const dx = p.targetX - p.x;
+    const dy = p.targetY - p.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
-
-    if (dist < proj.speed) {
-      // Hit
-      if (proj.type === "splash") {
+    if (dist < p.speed) {
+      if (p.type === "splash") {
         gameState.troops.forEach((t) => {
-          const d = Math.sqrt(
-            (t.x - proj.targetX) ** 2 + (t.y - proj.targetY) ** 2
-          );
-          if (d <= proj.splashRadius) t.health -= proj.damage;
+          if (
+            Math.sqrt((t.x - p.targetX) ** 2 + (t.y - p.targetY) ** 2) <=
+            p.splashRadius
+          )
+            t.health -= p.damage;
         });
-      } else if (target) {
-        target.health -= proj.damage;
-      }
+      } else if (target) target.health -= p.damage;
       gameState.projectiles.splice(i, 1);
     } else {
-      proj.x += (dx / dist) * proj.speed;
-      proj.y += (dy / dist) * proj.speed;
-      ctx.fillStyle = proj.color;
+      p.x += (dx / dist) * p.speed;
+      p.y += (dy / dist) * p.speed;
+      ctx.fillStyle = p.color;
       ctx.beginPath();
-      ctx.arc(proj.x, proj.y, 5, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
       ctx.fill();
     }
-  } // Cleanup Dead Troops
+  }
 
   for (let i = gameState.troops.length - 1; i >= 0; i--) {
     if (gameState.troops[i].health <= 0) {
@@ -1045,27 +987,29 @@ function gameLoop() {
       if (playerRole === "defender") gameState.defenderGold += 5;
     }
   }
+
+  if (selectedUnitRange > 0 && playerRole === "defender") {
+    drawRangeCircle(mouseX, mouseY);
+  }
+
   updateGameUI();
 }
 
 function findTarget(tower, range) {
   let target = null;
-  let maxProgress = -1;
-  gameState.troops.forEach((troop) => {
-    const dist = Math.sqrt((troop.x - tower.x) ** 2 + (troop.y - tower.y) ** 2);
-    if (dist <= range) {
-      // Simple priority: troop with highest lane progress (closer to base)
-      const p = troop.lane * 10000 + troop.pathIndex * 1000 + troop.progress;
-      if (p > maxProgress) {
-        maxProgress = p;
-        target = troop;
+  let maxP = -1;
+  gameState.troops.forEach((t) => {
+    if (Math.sqrt((t.x - tower.x) ** 2 + (t.y - tower.y) ** 2) <= range) {
+      const p = t.lane * 10000 + t.pathIndex * 1000 + t.progress;
+      if (p > maxP) {
+        maxP = p;
+        target = t;
       }
     }
   });
   return target;
 }
 
-// DRAWING FUNCTIONS
 function drawGameMap() {
   PATHS.forEach((path, idx) => {
     const colors = ["#a78bfa", "#f472b6", "#fb923c"];
@@ -1079,9 +1023,7 @@ function drawGameMap() {
     ctx.stroke();
     ctx.fillStyle = "white";
     ctx.font = "bold 16px Arial";
-    ctx.textAlign = "left";
-    // ctx.fillText(`Lane ${idx + 1}`, 10, path[0].y - 30);
-    ctx.fillText(`Lane ${idx + 1}`, 10, path[0].y - 45);
+    ctx.fillText(`Lane ${idx + 1}`, 10, path[0].y - 30);
   });
   ctx.fillStyle = "#3b82f6";
   ctx.beginPath();
@@ -1091,13 +1033,12 @@ function drawGameMap() {
   ctx.font = "20px Arial";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText("🏰", BASE_POS.x, BASE_POS.y); // HP BAR
-
+  ctx.fillText("🏰", BASE_POS.x, BASE_POS.y);
   ctx.fillStyle = "#000";
   ctx.fillRect(BASE_POS.x - 40, BASE_POS.y - 50, 80, 8);
-  const hpPct = Math.max(0, gameState.baseHP / 100);
-  ctx.fillStyle = hpPct > 0.5 ? "#10b981" : hpPct > 0.2 ? "#fbbf24" : "#ef4444";
-  ctx.fillRect(BASE_POS.x - 40, BASE_POS.y - 50, 80 * hpPct, 8);
+  const hp = Math.max(0, gameState.baseHP / 100);
+  ctx.fillStyle = hp > 0.5 ? "#10b981" : hp > 0.2 ? "#fbbf24" : "#ef4444";
+  ctx.fillRect(BASE_POS.x - 40, BASE_POS.y - 50, 80 * hp, 8);
 }
 
 function drawTroop(t, type) {
@@ -1107,7 +1048,7 @@ function drawTroop(t, type) {
   ctx.fill();
   ctx.fillStyle = "#fff";
   ctx.font = `${type.size + 4}px Arial`;
-  ctx.fillText(type.emoji, t.x, t.y); // HP
+  ctx.fillText(type.emoji, t.x - 5, t.y + 4);
   if (t.health < t.maxHealth) {
     ctx.fillStyle = "#000";
     ctx.fillRect(t.x - 15, t.y - type.size - 10, 30, 4);
@@ -1128,24 +1069,14 @@ function drawTower(t, type) {
   ctx.fill();
   ctx.fillStyle = "#fff";
   ctx.font = "16px Arial";
-  ctx.fillText(type.emoji, t.x, t.y);
-
-  if (playerRole === 'defender') {
-        const dist = Math.sqrt((t.x - mouseX)**2 + (t.y - mouseY)**2);
-        if (dist < 20) { // Jika kursor dekat tower
-            ctx.strokeStyle = type.color + "55"; // Semi-transparan
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.arc(t.x, t.y, type.range, 0, Math.PI * 2);
-            ctx.stroke();
-        }
-    }
+  ctx.fillText(type.emoji, t.x - 8, t.y + 5);
 }
 
 // WINDOW EXPORTS
 window.toggleAuth = toggleAuth;
 window.submitAuth = submitAuth;
 window.requestDashboard = requestDashboard;
+window.requestAvailableMatches = requestAvailableMatches; // Tambahkan ini agar tombol refresh jalan
 window.selectUnit = selectUnit;
 window.sendChat = sendChat;
 window.showCreateMatch = showCreateMatch;
@@ -1161,5 +1092,5 @@ window.confirmExit = confirmExit;
 window.logout = logout;
 
 // STARTUP
-checkSessionAndStart(); // Panggil fungsi ini untuk cek sesi dan memulai
+checkSessionAndStart();
 setInterval(gameLoop, 1000 / 60);
